@@ -1,0 +1,37 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><link rel="stylesheet" href="sidepanel.css"><title>Billy</title></head>
+<body>
+  <header><img src="icons/icon48.png" alt=""><b>Billy</b></header>
+  <nav>
+    <button data-tab="current" class="active">Current</button>
+    <button data-tab="library">Library</button>
+    <button data-tab="chat" disabled title="Phase 4">Chat</button>
+    <button data-tab="projects" disabled title="Phase 5">Projects</button>
+    <button data-tab="settings">Settings</button>
+  </nav>
+  <main>
+    <section id="current">
+      <div id="empty" class="muted">Turn on <b>Watch together</b> on a YouTube video, pause, tap <b>Ask Billy</b> and draw a box.</div>
+      <div id="ask" hidden>
+        <img id="crop" alt="Your selection">
+        <div id="meta" class="muted"></div>
+        <form id="form"><textarea id="q" rows="2" placeholder="What did he do here?"></textarea><button>Ask</button></form>
+        <div id="answer"></div>
+      </div>
+    </section>
+    <section id="library" hidden>
+      <input id="search" placeholder="Search your discoveries">
+      <select id="filter"><option value="">All types</option></select>
+      <div id="list"></div>
+      <button id="export" class="ghost">Export JSON</button>
+    </section>
+    <section id="settings" hidden>
+      <div id="privacy" class="note">Your crops, a few frames and nearby transcript go to Google through <b>your own Gemini key</b>. Google's free-tier terms may allow using that data. Nothing else leaves your computer.</div>
+      <label>Gemini API key <a href="https://aistudio.google.com/apikey" target="_blank">get one</a></label>
+      <input id="key" type="password" placeholder="AIza…">
+      <div class="row"><button id="save">Save</button><button id="test" class="ghost">Test key</button></div>
+      <div id="keyStatus" class="muted"></div>
+    </section>
+  </main>
+  <script src="sidepanel.js"></script>
+</body></html>
