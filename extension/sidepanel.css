@@ -1,0 +1,22 @@
+:root{--bg:#faf8f5;--fg:#1c1917;--muted:#78716c;--line:#e7e2db;--accent:#e85d3a;--card:#fff;--ok:#2f7d55;--warn:#b7791f}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 ui-sans-serif,system-ui,sans-serif}
+header{display:flex;gap:8px;align-items:center;padding:14px 16px 6px;font-size:16px}header img{width:22px}
+nav{display:flex;gap:2px;padding:0 10px;border-bottom:1px solid var(--line)}
+nav button{background:none;border:0;padding:10px 8px;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;font:inherit}
+nav button.active{color:var(--fg);border-color:var(--accent)}nav button:disabled{opacity:.35;cursor:default}
+main{padding:16px}.muted{color:var(--muted)}
+button{background:var(--fg);color:var(--bg);border:0;border-radius:10px;padding:8px 14px;font:600 13px system-ui;cursor:pointer}
+button.ghost{background:transparent;color:var(--fg);border:1px solid var(--line)}button:disabled{opacity:.5}
+input,textarea,select{width:100%;padding:10px;border:1px solid var(--line);border-radius:10px;background:var(--card);font:inherit;margin-bottom:8px}
+#crop{width:100%;border-radius:12px;border:1px solid var(--line)}
+form{display:flex;gap:8px;align-items:flex-end}form textarea{margin:0}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;margin:12px 0}
+h4{margin:12px 0 4px;font-size:12px;text-transform:uppercase;letter-spacing:.06em}
+.obs h4{color:var(--ok)}.inf h4{color:var(--warn)}.cant h4{color:var(--muted)}
+ul,ol{margin:0;padding-left:18px}
+pre{background:#1c1917;color:#fafaf9;padding:10px;border-radius:8px;overflow:auto;position:relative;white-space:pre-wrap}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}a{color:var(--accent)}
+.ts{color:var(--accent);cursor:pointer;font-variant-numeric:tabular-nums}
+.note{background:#fff4ee;border:1px solid #f6d3c4;padding:10px;border-radius:10px;margin-bottom:14px;font-size:13px}
+.tag{display:inline-block;font-size:11px;background:var(--line);border-radius:999px;padding:2px 8px;margin-right:4px}
+.thumb{width:100%;border-radius:8px;margin-bottom:6px}

@@ -8,3 +8,5 @@
 > Commits you push to the connected branch sync back to Lovable and show up in
 > the editor, so keep the branch in a working state.
 <!-- LOVABLE:END -->
+
+- Billy Chrome extension source lives in extension/ (plain MV3 JS, no build step); re-zip into public/billy-extension.zip after edits — so it loads unpacked directly.
