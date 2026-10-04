@@ -1,6 +1,9 @@
-// Billy background: the ONLY place that talks to Gemini.
-const FALLBACK_MODEL = "gemini-3.5-flash"; // used when no model has been discovered yet
-const API = (k) => `https://generativelanguage.googleapis.com/v1beta/models/${FALLBACK_MODEL}:generateContent?key=${encodeURIComponent(k)}`;
+// Billy background: the ONLY place that reads the key and talks to Gemini. Also does local saves.
+importScripts("db.js");
+
+const FALLBACK_MODEL = "gemini-3.5-flash"; // used only if model discovery fails
+const BASE = "https://generativelanguage.googleapis.com/v1beta";
+const TYPES = ["inspiration", "visual_step", "code", "command", "website", "tool", "idea", "note", "learning"];
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.storage.local.setAccessLevel?.({ accessLevel: "TRUSTED_CONTEXTS" });
@@ -8,88 +11,205 @@ chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
 });
 
-const TYPES = ["inspiration","visual_step","code","command","website","tool","idea","note","learning"];
-const SCHEMA = {
+// ---------- log (last 200 events) ----------
+async function log(action, result, extra = {}) {
+  const { log: l = [] } = await chrome.storage.local.get("log");
+  l.push({ at: new Date().toISOString(), action, result, ...extra });
+  await chrome.storage.local.set({ log: l.slice(-200) });
+}
+
+// ---------- errors ----------
+const MESSAGES = {
+  NO_KEY: "Add your Gemini key in Billy's Settings first.",
+  AUTH: "Google rejected your key. Check it in Settings.",
+  RATE_LIMIT: "Gemini's limit is reached for now. Try again in a minute.",
+  MODEL_NOT_FOUND: "That Gemini model isn't available to your key.",
+  TIMEOUT: "Gemini took too long to answer. Try again.",
+  BAD_RESPONSE: "Billy got a confusing answer from Gemini. Try again.",
+  NETWORK: "Couldn't reach Google. Check your internet.",
+  BLOCKED: "Gemini refused to answer this one.",
+};
+class AIError extends Error { constructor(code, detail) { super(MESSAGES[code] + (detail ? ` (${detail})` : "")); this.code = code; } }
+
+async function req(url, init, ms) {
+  const c = new AbortController(), t = setTimeout(() => c.abort(), ms);
+  try { return await fetch(url, { ...init, signal: c.signal }); }
+  catch (e) { throw new AIError(e.name === "AbortError" ? "TIMEOUT" : "NETWORK"); }
+  finally { clearTimeout(t); }
+}
+async function fromHttp(r) {
+  const j = await r.json().catch(() => ({}));
+  const m = j?.error?.message || "";
+  if (r.status === 429) return new AIError("RATE_LIMIT");
+  if (r.status === 404 || /not found|no longer available|not supported/i.test(m)) return new AIError("MODEL_NOT_FOUND", m.slice(0, 120));
+  if (r.status === 401 || r.status === 403 || /api key/i.test(m)) return new AIError("AUTH");
+  return new AIError("BAD_RESPONSE", m.slice(0, 120) || `HTTP ${r.status}`);
+}
+async function key() {
+  const { apiKey } = await chrome.storage.local.get("apiKey");
+  if (!apiKey) throw new AIError("NO_KEY");
+  return apiKey;
+}
+
+// ---------- model selection: discover, never hard-code ----------
+async function pickModel(force = false) {
+  const s = await chrome.storage.local.get(["modelOverride", "modelCache"]);
+  if (s.modelOverride) return s.modelOverride;
+  if (!force && s.modelCache && Date.now() - s.modelCache.at < 864e5) return s.modelCache.name;
+  const r = await req(`${BASE}/models?pageSize=1000&key=${encodeURIComponent(await key())}`, {}, 10000);
+  if (!r.ok) throw await fromHttp(r);
+  const names = ((await r.json()).models || [])
+    .filter((m) => m.supportedGenerationMethods?.includes("generateContent"))
+    .map((m) => m.name.replace(/^models\//, ""))
+    .filter((n) => /^gemini-\d/.test(n) && /flash/.test(n) && !/image|tts|live|audio|embed|thinking|8b|native/.test(n));
+  const score = (n) => {
+    const v = parseFloat(n.match(/^gemini-(\d+(?:\.\d+)?)/)[1]);
+    const unstable = /preview|exp/.test(n) ? 1 : 0, lite = /lite/.test(n) ? 1 : 0;
+    return -unstable * 1000 + v * 10 - lite;
+  };
+  names.sort((a, b) => score(b) - score(a));
+  const name = names[0] || FALLBACK_MODEL;
+  await chrome.storage.local.set({ modelCache: { name, at: Date.now(), candidates: names.slice(0, 8) } });
+  return name;
+}
+
+async function generate(body, ms = 45000) {
+  const k = await key();
+  let model = await pickModel(), refetched = false;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const r = await req(`${BASE}/models/${model}:generateContent?key=${encodeURIComponent(k)}`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }, ms);
+    if (r.ok) {
+      const j = await r.json();
+      if (j?.promptFeedback?.blockReason || j?.candidates?.[0]?.finishReason === "SAFETY") throw new AIError("BLOCKED");
+      const text = j?.candidates?.[0]?.content?.parts?.map((p) => p.text || "").join("") || "";
+      if (!text) throw new AIError("BAD_RESPONSE", "empty");
+      return { text, model };
+    }
+    const e = await fromHttp(r);
+    if (e.code === "MODEL_NOT_FOUND" && !refetched) { refetched = true; model = await pickModel(true); continue; }
+    if ((e.code === "RATE_LIMIT" || r.status >= 500) && attempt === 0) { await new Promise((s) => setTimeout(s, 2500)); continue; }
+    throw e;
+  }
+  throw new AIError("BAD_RESPONSE");
+}
+
+// ---------- schemas + validators ----------
+const S = { type: "string" }, SA = { type: "array", items: S };
+const ASK_SCHEMA = {
   type: "object",
   properties: {
-    answer: { type: "string" },
-    observed: { type: "array", items: { type: "string" } },
-    inferred: { type: "array", items: { type: "string" } },
-    cannotTell: { type: "array", items: { type: "string" } },
-    steps: { type: "array", items: { type: "object", properties: { text: { type: "string" }, timestampSec: { type: "number" } }, required: ["text"] } },
-    copyBlocks: { type: "array", items: { type: "object", properties: { kind: { type: "string", enum: ["code","command","url","text"] }, language: { type: "string" }, content: { type: "string" } }, required: ["kind","content"] } },
-    suggestedDiscovery: { type: "object", properties: { title: { type: "string" }, type: { type: "string", enum: TYPES }, tags: { type: "array", items: { type: "string" } } }, required: ["title","type","tags"] }
+    answer: S, observed: SA, inferred: SA, cannotTell: SA,
+    steps: { type: "array", items: { type: "object", properties: { text: S, timestampSec: { type: "number" } }, required: ["text"] } },
+    copyBlocks: { type: "array", items: { type: "object", properties: { kind: { type: "string", enum: ["code", "command", "url", "text"] }, language: S, content: S }, required: ["kind", "content"] } },
+    suggestedDiscovery: { type: "object", properties: { title: S, type: { type: "string", enum: TYPES }, tags: SA }, required: ["title", "type", "tags"] },
   },
-  required: ["answer","observed","inferred","cannotTell","suggestedDiscovery"]
+  required: ["answer", "observed", "inferred", "cannotTell", "suggestedDiscovery"],
 };
-
-// Strict validation (Zod-equivalent) before anything reaches UI/DB.
-function validate(o) {
-  const strs = (a) => Array.isArray(a) && a.every((s) => typeof s === "string");
-  if (!o || typeof o.answer !== "string" || !strs(o.observed) || !strs(o.inferred) || !strs(o.cannotTell)) throw new Error("bad shape");
+const KINDS = ["url", "command", "code", "text", "path", "email"];
+const COPY_SCHEMA = {
+  type: "object",
+  properties: {
+    artifacts: { type: "array", items: { type: "object", properties: {
+      kind: { type: "string", enum: KINDS }, content: S, language: S,
+      confidence: { type: "string", enum: ["high", "medium", "low"] }, uncertain: SA,
+    }, required: ["kind", "content", "confidence"] } },
+    note: S,
+  },
+  required: ["artifacts"],
+};
+const strs = (a) => Array.isArray(a) && a.every((s) => typeof s === "string");
+function validAsk(o) {
+  if (!o || typeof o.answer !== "string" || !strs(o.observed) || !strs(o.inferred) || !strs(o.cannotTell)) throw 0;
   const sd = o.suggestedDiscovery;
-  if (!sd || typeof sd.title !== "string" || !TYPES.includes(sd.type) || !strs(sd.tags)) throw new Error("bad discovery");
+  if (!sd || typeof sd.title !== "string" || !TYPES.includes(sd.type) || !strs(sd.tags)) throw 0;
   o.steps = (o.steps || []).filter((s) => s && typeof s.text === "string");
-  o.copyBlocks = (o.copyBlocks || []).filter((b) => b && typeof b.content === "string" && ["code","command","url","text"].includes(b.kind));
+  o.copyBlocks = (o.copyBlocks || []).filter((b) => b && typeof b.content === "string");
+  return o;
+}
+function validCopy(o) {
+  if (!o || !Array.isArray(o.artifacts)) throw 0;
+  o.artifacts = o.artifacts.filter((a) => a && typeof a.content === "string" && KINDS.includes(a.kind))
+    .map((a) => ({ ...a, confidence: ["high", "medium", "low"].includes(a.confidence) ? a.confidence : "low", uncertain: strs(a.uncertain) ? a.uncertain : [] }));
   return o;
 }
 
-const P2 = `You are Billy, watching a video with the user. Inputs: (1) CROP, the exact area the user pointed at; (2) the CURRENT FRAME and some frames before the pause; (3) TRANSCRIPT within ±30 s; (4) title, channel, timestamp; (5) the user's QUESTION. Answer the question about the crop, using the other inputs to understand what happened just before.
-Rules: separate observed (clearly visible or spoken) from inferred (start each with "Probably"). If text is too small, blurry, or the action isn't visible, put it in cannotTell, never guess. Never invent a click, setting, command or code. Exact commands/code go in copyBlocks, copied character-for-character from what is visible; if a character is unclear, say so. For silent procedures, give numbered steps with approximate timestamps. Be short and plain. Output JSON only.`;
+// ---------- prompts ----------
+const P_ASK = `You are Billy, watching a video with the user. Inputs: CROP (the exact area the user boxed), the CURRENT FRAME, some earlier frames, the TRANSCRIPT within ±30 s, the video title and timestamp, and the user's QUESTION. Answer about the crop, using the other inputs to understand what happened just before.
+Rules: separate observed (clearly visible or spoken) from inferred (start each with "Probably"). If text is too small, blurry, or the action isn't visible, put it in cannotTell — never guess. Never invent a click, setting, command or code. Exact commands/code go in copyBlocks, copied character-for-character; if a character is unclear, say so. For silent procedures give numbered steps with approximate timestamps. Be short and plain. JSON only.`;
+const P_COPY = `You are Billy. The user boxed something in a video and pressed Copy. Inputs: CROP (the boxed area), the current frame, and the transcript within ±30 seconds. Return exactly what is written in the crop, character for character, as artifacts. Use the transcript only for context. Do not autocorrect, do not add "https://" unless visible, keep case and spacing. If a character is ambiguous, set confidence lower and describe it in "uncertain". If nothing readable is in the crop, return an empty artifacts list and explain in note. JSON only.`;
 
-const b64 = (dataUrl) => ({ inline_data: { mime_type: "image/jpeg", data: dataUrl.split(",")[1] } });
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const img = (d) => ({ inline_data: { mime_type: "image/jpeg", data: d.split(",")[1] } });
+const ctx = (p) => ({ text: `Video: "${p.titleGuess}" ${p.channel ? `by ${p.channel}` : ""}. Paused at ${p.timestampSec}s. URL ${p.url}` });
+const tr = (p) => ({ text: `TRANSCRIPT ±30s:\n${p.transcriptWindow || "(no transcript available — rely on images and say so)"}` });
 
-async function gemini(body) {
-  const { apiKey } = await chrome.storage.local.get("apiKey");
-  if (!apiKey) throw new Error("Add your Gemini key in Settings first.");
-  for (let i = 0; i < 3; i++) {
-    const r = await fetch(API(apiKey), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-    if (r.status === 429 || r.status >= 500) { if (i < 2) { await sleep(2000 * 2 ** i); continue; } throw new Error("Gemini is busy or your free-tier limit is reached. Try again in a minute."); }
-    const j = await r.json();
-    if (!r.ok) throw new Error(j?.error?.message || `Gemini error ${r.status}`);
-    const text = j?.candidates?.[0]?.content?.parts?.map((p) => p.text || "").join("") || "";
-    if (!text) throw new Error("Gemini returned nothing (it may have refused).");
-    return text;
+async function structured(parts, schema, check) {
+  const body = { contents: [{ role: "user", parts }], generationConfig: { responseMimeType: "application/json", responseSchema: schema } };
+  for (let i = 0; i < 2; i++) {
+    const { text, model } = await generate(body);
+    try { return { data: check(JSON.parse(text)), model }; } catch { if (i) throw new AIError("BAD_RESPONSE"); }
+  }
+}
+const pauseAsk = (p, question) => structured([
+  { text: P_ASK }, ctx(p), { text: "CROP:" }, img(p.cropB64), { text: "CURRENT FRAME:" }, img(p.currentFrameB64),
+  ...(p.priorFramesB64 || []).flatMap((f, i, a) => [{ text: `FRAME ~${(a.length - i) * 2}s earlier:` }, img(f)]),
+  tr(p), { text: `QUESTION: ${question}` },
+], ASK_SCHEMA, validAsk);
+const copyExtract = (p) => structured([
+  { text: P_COPY }, ctx(p), { text: "CROP:" }, img(p.cropB64), { text: "CURRENT FRAME:" }, img(p.currentFrameB64), tr(p),
+], COPY_SCHEMA, validCopy);
+
+// ---------- actions ----------
+const slim = (p) => ({ ...p, priorFramesB64: [] }); // keep session storage small
+async function setLast(v) { await chrome.storage.session.set({ last: { ...v, at: Date.now() } }); }
+
+async function handle(msg, tabId) {
+  const t0 = Date.now(), { p } = msg;
+  try {
+    if (msg.t === "SAVE") {
+      const m = await saveMoment(p, msg.extra);
+      await log("SAVE", "done", { id: p.requestId, ms: Date.now() - t0 });
+      chrome.storage.session.set({ libraryChanged: Date.now() });
+      return { state: "done", message: "Saved to your library", id: m.id };
+    }
+    await setLast({ kind: msg.t, state: "working", p: slim(p), question: msg.question, tabId });
+    const r = msg.t === "ASK" ? await pauseAsk(p, msg.question) : await copyExtract(p);
+    await setLast({ kind: msg.t, state: "done", p: slim(p), question: msg.question, tabId, result: r.data, model: r.model });
+    await log(msg.t, "done", { id: p.requestId, ms: Date.now() - t0, model: r.model });
+    const n = r.data.artifacts?.length;
+    return { state: "done", message: msg.t === "COPY" ? (n ? `Found ${n} item${n > 1 ? "s" : ""} — see the side panel` : "Nothing readable in the box") : "Answer is in the side panel" };
+  } catch (e) {
+    const message = e instanceof AIError ? e.message : `Something broke: ${e?.message || e}`;
+    if (msg.t !== "SAVE") await setLast({ kind: msg.t, state: "error", p: slim(p), question: msg.question, tabId, error: message });
+    await log(msg.t, "error", { id: p?.requestId, ms: Date.now() - t0, code: e?.code, message });
+    return { state: "error", message };
   }
 }
 
-async function ask(p) {
-  const parts = [
-    { text: P2 },
-    { text: `Video: "${p.title}" by ${p.channel}. Paused at ${p.timestampSec}s.` },
-    { text: "CROP:" }, b64(p.crop),
-    { text: "CURRENT FRAME:" }, b64(p.current),
-    ...p.frames.flatMap((f, i) => [{ text: `FRAME -${(p.frames.length - i) * 2}s:` }, b64(f)]),
-    { text: `TRANSCRIPT ±30s:\n${p.transcript || "(no transcript available — rely on frames and say so)"}` },
-    { text: `QUESTION: ${p.question}` }
-  ];
-  const body = { contents: [{ role: "user", parts }], generationConfig: { responseMimeType: "application/json", responseSchema: SCHEMA } };
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const text = await gemini(body);
-    try { return validate(JSON.parse(text)); } catch { if (attempt) throw new Error("Billy got a malformed answer. Please try again."); }
-  }
+async function testKey() {
+  const t0 = Date.now();
+  await key();
+  const model = await pickModel(true);
+  const r = await req(`${BASE}/models/${model}:generateContent?key=${encodeURIComponent(await key())}`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contents: [{ parts: [{ text: "Reply with the word ok." }] }] }) }, 10000);
+  if (!r.ok) throw await fromHttp(r);
+  await log("TEST_KEY", "done", { model, ms: Date.now() - t0 });
+  return { model, ms: Date.now() - t0 };
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
-  if (msg.type === "capture") {
-    chrome.storage.session.set({ pending: { ...msg.data, tabId: sender.tab.id } });
-    chrome.sidePanel.open({ tabId: sender.tab.id }).catch(() => {});
-    reply({ ok: true });
+  const tabId = msg.tabId ?? sender.tab?.id;
+  if (msg.t === "ASK" || msg.t === "COPY") { if (sender.tab) chrome.sidePanel.open({ tabId }).catch(() => {}); }
+  if (["SAVE", "ASK", "COPY"].includes(msg.t)) { handle(msg, tabId).then(reply); return true; }
+  if (msg.t === "WATCH_GET") { chrome.storage.local.get("watchOn").then((r) => reply({ on: !!r.watchOn })); return true; }
+  if (msg.t === "WATCH_SET") { chrome.storage.local.set({ watchOn: !!msg.on }).then(() => reply({ ok: true })); log("WATCH_SET", msg.on ? "on" : "off"); return true; }
+  if (msg.t === "PING") { reply({ ok: true, at: Date.now() }); return; }
+  if (msg.t === "TEST_KEY") {
+    testKey().then((r) => reply({ ok: true, ...r })).catch(async (e) => {
+      const message = e instanceof AIError ? e.message : String(e?.message || e);
+      await log("TEST_KEY", "error", { code: e?.code, message });
+      reply({ ok: false, error: message });
+    });
+    return true;
   }
-  if (msg.type === "seek") {
-    chrome.tabs?.sendMessage?.(msg.tabId, msg);
-  }
-});
-
-chrome.runtime.onConnect.addListener((port) => {
-  port.onMessage.addListener(async (msg) => {
-    try {
-      if (msg.type === "ask") port.postMessage({ ok: true, result: await ask(msg.data) });
-      if (msg.type === "testKey") {
-        await gemini({ contents: [{ parts: [{ text: "Reply with the word ok." }] }] });
-        port.postMessage({ ok: true });
-      }
-    } catch (e) { port.postMessage({ ok: false, error: e.message }); }
-  });
 });
