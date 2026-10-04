@@ -1,6 +1,6 @@
 // Billy background: the ONLY place that talks to Gemini.
-const MODEL = "gemini-2.5-flash"; // check current Flash model in AI Studio
-const API = (k) => `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${encodeURIComponent(k)}`;
+const FALLBACK_MODEL = "gemini-3.5-flash"; // used when no model has been discovered yet
+const API = (k) => `https://generativelanguage.googleapis.com/v1beta/models/${FALLBACK_MODEL}:generateContent?key=${encodeURIComponent(k)}`;
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.storage.local.setAccessLevel?.({ accessLevel: "TRUSTED_CONTEXTS" });
