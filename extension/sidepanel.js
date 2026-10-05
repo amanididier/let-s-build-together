@@ -1,88 +1,71 @@
-// Billy side panel: Current | Library | Settings. Data lives in IndexedDB.
+// Billy side panel: Current | Library | Settings. Reads the last result from session storage, library from IndexedDB (db.js).
 const $ = (id) => document.getElementById(id);
 const fmt = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
-const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-const TYPES = ["inspiration","visual_step","code","command","website","tool","idea","note","learning"];
-
-// ---------- DB ----------
-const dbp = new Promise((res, rej) => {
-  const r = indexedDB.open("billy", 1);
-  r.onupgradeneeded = () => { const d = r.result; d.createObjectStore("videos", { keyPath: "id" }); d.createObjectStore("discoveries", { keyPath: "id" }); };
-  r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
-});
-async function tx(store, mode, fn) { const d = await dbp; return new Promise((res, rej) => { const t = d.transaction(store, mode); const out = fn(t.objectStore(store)); t.oncomplete = () => res(out?.result ?? out); t.onerror = () => rej(t.error); }); }
-const all = (s) => tx(s, "readonly", (st) => st.getAll());
-const put = (s, v) => tx(s, "readwrite", (st) => st.put(v));
-const del = (s, k) => tx(s, "readwrite", (st) => st.delete(k));
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const TYPES = ["inspiration", "visual_step", "code", "command", "website", "tool", "idea", "note", "learning"];
+const send = (msg) => new Promise((res) => chrome.runtime.sendMessage(msg, (r) => res(chrome.runtime.lastError ? { state: "error", message: chrome.runtime.lastError.message } : r)));
 
 // ---------- Tabs ----------
-document.querySelectorAll("nav button").forEach((b) => b.onclick = () => {
-  document.querySelectorAll("nav button").forEach((x) => x.classList.toggle("active", x === b));
-  document.querySelectorAll("main section").forEach((s) => s.hidden = s.id !== b.dataset.tab);
-  if (b.dataset.tab === "library") renderLibrary();
-});
+function show(tab) {
+  document.querySelectorAll("nav button").forEach((x) => x.classList.toggle("active", x.dataset.tab === tab));
+  document.querySelectorAll("main section").forEach((s) => (s.hidden = s.id !== tab));
+  if (tab === "library") renderLibrary();
+}
+document.querySelectorAll("nav button").forEach((b) => (b.onclick = () => show(b.dataset.tab)));
+
+// ---------- Seek: jump the open tab if it's the same video, else open a new tab ----------
+async function seek(videoId, sec, tabId) {
+  const tabs = tabId ? [{ id: tabId }] : await chrome.tabs.query({ url: "https://www.youtube.com/*" }).catch(() => []);
+  for (const t of tabs) {
+    const r = await chrome.tabs.sendMessage(t.id, { t: "SEEK", videoId, sec }).catch(() => null);
+    if (r?.ok) { chrome.tabs.update(t.id, { active: true }).catch(() => {}); return; }
+  }
+  chrome.tabs.create({ url: `https://www.youtube.com/watch?v=${videoId}&t=${Math.floor(sec)}s` });
+}
+
+const list = (cls, title, arr) => (arr?.length ? `<div class="${cls}"><h4>${title}</h4><ul>${arr.map((x) => `<li>${esc(x)}</li>`).join("")}</ul></div>` : "");
+const blocks = (bs) => (bs || []).map((b, i) => `<div class="blk"><div class="muted small">${esc(b.kind)}${b.confidence && b.confidence !== "high" ? ` · ${b.confidence} confidence` : ""}</div><pre>${esc(b.content)}</pre>${b.uncertain?.length ? `<div class="muted small">Unsure: ${esc(b.uncertain.join("; "))}</div>` : ""}<button class="ghost copy" data-i="${i}">Copy</button></div>`).join("");
+const steps = (st) => (st?.length ? `<h4>Steps</h4><ol>${st.map((s) => `<li>${s.timestampSec != null ? `<span class="ts" data-t="${s.timestampSec}">${fmt(s.timestampSec)}</span> ` : ""}${esc(s.text)}</li>`).join("")}</ol>` : "");
+function bind(el, items, videoId, tabId) {
+  el.querySelectorAll(".copy").forEach((b) => (b.onclick = async () => { await navigator.clipboard.writeText(items[b.dataset.i].content); b.textContent = "Copied ✓"; }));
+  el.querySelectorAll(".ts").forEach((s) => (s.onclick = () => seek(videoId, +s.dataset.t, tabId)));
+}
 
 // ---------- Current ----------
-let pending = null, last = null;
-async function loadPending() {
-  const { pending: p } = await chrome.storage.session.get("pending");
-  if (!p) return; pending = p; last = null;
-  $("empty").hidden = true; $("ask").hidden = false;
-  $("crop").src = p.crop; $("meta").textContent = `${p.title} · ${fmt(p.timestampSec)}${p.captionsAvailable ? "" : " · no transcript"}`;
-  $("answer").innerHTML = ""; $("q").value = ""; $("q").focus();
+async function renderCurrent() {
+  const { last } = await chrome.storage.session.get("last");
+  const el = $("current");
+  if (!last) { el.innerHTML = `<div class="muted">Turn on <b>Watch together</b> on a YouTube video, pause, draw a box, then pick <b>Ask</b> or <b>Copy</b>.</div>`; return; }
+  const { p, kind, state, result, question, tabId } = last;
+  const head = `<img id="crop" src="${p.cropB64}" alt="Your box"><div class="muted">${esc(p.titleGuess)} · <span class="ts" data-t="${p.timestampSec}">${fmt(p.timestampSec)}</span>${p.transcriptWindow ? "" : " · no transcript"}</div>${question ? `<p><b>You asked:</b> ${esc(question)}</p>` : ""}`;
+  let body = "";
+  if (state === "working") body = `<div class="card muted">${kind === "ASK" ? "Billy is looking…" : "Reading the box…"}</div>`;
+  else if (state === "error") body = `<div class="card err">${esc(last.error)}</div>`;
+  else if (kind === "ASK") body = `<div class="card"><p>${esc(result.answer)}</p>${list("obs", "Observed", result.observed)}${list("inf", "Inferred", result.inferred)}${list("cant", "Can't tell", result.cannotTell)}${steps(result.steps)}${result.copyBlocks.length ? "<h4>Copy</h4>" + blocks(result.copyBlocks) : ""}</div>`;
+  else body = `<div class="card">${result.artifacts.length ? blocks(result.artifacts) : `<p class="muted">${esc(result.note || "Nothing readable in the box.")}</p>`}</div>`;
+  const canSave = state === "done";
+  el.innerHTML = head + body + (canSave ? `<div class="row"><button id="remember">Save to library</button><button class="ghost" id="again">Watch again</button></div><div class="muted small">Model: ${esc(last.model)}</div>` : "");
+  const items = kind === "ASK" ? result?.copyBlocks : result?.artifacts;
+  bind(el, items || [], p.videoId, tabId);
+  if (!canSave) return;
+  $("again").onclick = () => seek(p.videoId, p.timestampSec, tabId);
+  $("remember").onclick = async () => {
+    const sd = result.suggestedDiscovery, a0 = result.artifacts?.[0];
+    const title = prompt("Title", sd?.title || a0?.content?.slice(0, 60) || p.titleGuess);
+    if (title === null) return;
+    const btn = $("remember"); btn.disabled = true; btn.textContent = "Saving…";
+    const r = await send({ t: "SAVE", p, extra: {
+      title, type: sd?.type || (a0 ? KIND_TO_TYPE[a0.kind] : "note"), tags: sd?.tags || [], question: question || "",
+      answer: kind === "ASK" ? result : null, artifacts: kind === "COPY" ? result.artifacts : result.copyBlocks,
+    } });
+    btn.textContent = r?.state === "done" ? "Saved ✓" : (r?.message || "Failed"); if (r?.state !== "done") btn.disabled = false;
+  };
 }
-chrome.storage.session.onChanged.addListener((c) => c.pending && loadPending());
-loadPending();
-
-function call(msg) {
-  return new Promise((res) => { const port = chrome.runtime.connect(); port.onMessage.addListener((m) => { res(m); port.disconnect(); }); port.postMessage(msg); });
-}
-
-$("form").onsubmit = async (e) => {
-  e.preventDefault(); const question = $("q").value.trim(); if (!question || !pending) return;
-  const btn = e.target.querySelector("button"); btn.disabled = true;
-  $("answer").innerHTML = `<div class="card muted">Billy is looking…</div>`;
-  const r = await call({ type: "ask", data: { ...pending, question } });
-  btn.disabled = false;
-  if (!r.ok) { $("answer").innerHTML = `<div class="card">${esc(r.error)}</div>`; return; }
-  last = { question, ...r.result }; renderAnswer(last);
-};
-
-const list = (cls, title, arr) => arr?.length ? `<div class="${cls}"><h4>${title}</h4><ul>${arr.map((x) => `<li>${esc(x)}</li>`).join("")}</ul></div>` : "";
-function blocksHtml(bs) { return bs.map((b, i) => `<pre>${esc(b.content)}</pre><button class="ghost copy" data-i="${i}">Copy</button>`).join(""); }
-function stepsHtml(st) { return st?.length ? `<h4>Steps</h4><ol>${st.map((s) => `<li>${s.timestampSec != null ? `<span class="ts" data-t="${s.timestampSec}">${fmt(s.timestampSec)}</span> ` : ""}${esc(s.text)}</li>`).join("")}</ol>` : ""; }
-
-function renderAnswer(a) {
-  $("answer").innerHTML = `<div class="card"><p>${esc(a.answer)}</p>
-    ${list("obs", "Observed", a.observed)}${list("inf", "Inferred", a.inferred)}${list("cant", "Can't tell", a.cannotTell)}
-    ${stepsHtml(a.steps)}${a.copyBlocks.length ? "<h4>Copy</h4>" + blocksHtml(a.copyBlocks) : ""}
-    <div class="row"><button id="remember">Remember</button><button class="ghost" id="copyAll">Copy answer</button><button class="ghost" id="watch">Watch again</button></div></div>`;
-  bindCommon($("answer"), a.copyBlocks, pending.youtubeId, pending.tabId);
-  $("copyAll").onclick = () => navigator.clipboard.writeText(a.answer);
-  $("watch").onclick = () => seek(pending.tabId, pending.youtubeId, pending.timestampSec);
-  $("remember").onclick = () => remember();
-}
-
-function bindCommon(el, blocks, ytId, tabId) {
-  el.querySelectorAll(".copy").forEach((b) => b.onclick = () => { navigator.clipboard.writeText(blocks[b.dataset.i].content); b.textContent = "Copied"; });
-  el.querySelectorAll(".ts").forEach((s) => s.onclick = () => seek(tabId, ytId, +s.dataset.t));
-}
-function seek(tabId, ytId, sec) {
-  chrome.tabs?.update ? null : null;
-  window.open(`https://www.youtube.com/watch?v=${ytId}&t=${Math.floor(sec)}s`, "_blank");
-}
-
-async function remember() {
-  const p = pending, a = last, sd = a.suggestedDiscovery;
-  const title = prompt("Title for this discovery", sd.title); if (title === null) return;
-  const crop = await (await fetch(p.crop)).blob();
-  await put("videos", { id: p.youtubeId, youtubeId: p.youtubeId, title: p.title, channel: p.channel, url: `https://www.youtube.com/watch?v=${p.youtubeId}`,
-    thumbnailUrl: `https://i.ytimg.com/vi/${p.youtubeId}/mqdefault.jpg`, captionsAvailable: p.captionsAvailable, lastWatchedAt: Date.now() });
-  await put("discoveries", { id: crypto.randomUUID(), videoId: p.youtubeId, videoTitle: p.title, timestampSec: p.timestampSec,
-    title, type: sd.type, tags: sd.tags, question: a.question, answer: a.answer, observed: a.observed, inferred: a.inferred,
-    cannotTell: a.cannotTell, steps: a.steps, copyBlocks: a.copyBlocks, transcriptContext: p.transcript, cropImage: crop, projectIds: [], createdAt: Date.now() });
-  $("remember").textContent = "Remembered ✓"; $("remember").disabled = true;
-}
+chrome.storage.session.onChanged.addListener((c) => {
+  if (c.last) { renderCurrent(); if (c.last.newValue?.state === "working") show("current"); }
+  if (c.libraryChanged && !$("library").hidden) renderLibrary();
+});
+renderCurrent();
 
 // ---------- Library ----------
 TYPES.forEach((t) => $("filter").insertAdjacentHTML("beforeend", `<option>${t}</option>`));
@@ -91,32 +74,44 @@ const urls = [];
 async function renderLibrary() {
   urls.splice(0).forEach(URL.revokeObjectURL);
   const q = $("search").value.toLowerCase().split(/\s+/).filter(Boolean), type = $("filter").value;
-  const items = (await all("discoveries")).sort((a, b) => b.createdAt - a.createdAt).filter((d) => {
-    if (type && d.type !== type) return false;
-    const hay = [d.title, d.answer, d.question, d.videoTitle, ...d.tags, ...d.observed, d.transcriptContext].join(" ").toLowerCase();
+  const items = (await DB.all("moments")).sort((a, b) => b.createdAt - a.createdAt).filter((m) => {
+    if (type && m.type !== type) return false;
+    const hay = [m.title, m.question, m.videoTitle, m.channel, m.answer?.answer, ...(m.tags || []), ...(m.artifacts || []).map((a) => a.content), m.transcript].join(" ").toLowerCase();
     return q.every((w) => hay.includes(w));
   });
-  $("list").innerHTML = items.length ? "" : `<p class="muted">Nothing saved yet. Tap <b>Remember</b> on an answer.</p>`;
-  for (const d of items) {
+  $("list").innerHTML = items.length ? "" : `<p class="muted">${q.length || type ? "No matches." : "Nothing saved yet. Draw a box on a paused video and hit Save."}</p>`;
+  for (const m of items) {
     const el = document.createElement("div"); el.className = "card";
-    const src = d.cropImage ? URL.createObjectURL(d.cropImage) : ""; if (src) urls.push(src);
-    el.innerHTML = `${src ? `<img class="thumb" src="${src}">` : ""}<b>${esc(d.title)}</b>
-      <div class="muted">${esc(d.videoTitle)} · <span class="ts" data-t="${d.timestampSec}">${fmt(d.timestampSec)}</span></div>
-      <div><span class="tag">${d.type}</span>${d.tags.map((t) => `<span class="tag">${esc(t)}</span>`).join("")}</div>
-      <p>${esc(d.answer)}</p>${blocksHtml(d.copyBlocks)}
+    const src = m.crop ? URL.createObjectURL(m.crop) : ""; if (src) urls.push(src);
+    el.innerHTML = `${src ? `<img class="thumb" src="${src}">` : ""}<b>${esc(m.title)}</b>
+      <div class="muted">${esc(m.videoTitle)} · <span class="ts" data-t="${m.startSec}">${fmt(m.startSec)}</span></div>
+      <div><span class="tag">${esc(m.type)}</span>${(m.tags || []).map((t) => `<span class="tag">${esc(t)}</span>`).join("")}</div>
+      ${m.question ? `<p class="muted">Q: ${esc(m.question)}</p>` : ""}${m.answer?.answer ? `<p>${esc(m.answer.answer)}</p>` : ""}${blocks(m.artifacts)}
       <div class="row"><button class="ghost del">Delete</button></div>`;
-    bindCommon(el, d.copyBlocks, d.videoId);
-    el.querySelector(".del").onclick = async () => { if (confirm("Delete this discovery?")) { await del("discoveries", d.id); renderLibrary(); } };
+    bind(el, m.artifacts || [], m.videoId);
+    el.querySelector(".del").onclick = async () => { if (confirm("Delete this?")) { await DB.del("moments", m.id); renderLibrary(); } };
     $("list").appendChild(el);
   }
 }
+const toData = (b) => new Promise((r) => { const f = new FileReader(); f.onload = () => r(f.result); f.readAsDataURL(b); });
 $("export").onclick = async () => {
-  const ds = await Promise.all((await all("discoveries")).map(async (d) => ({ ...d, cropImage: d.cropImage ? await new Promise((r) => { const f = new FileReader(); f.onload = () => r(f.result); f.readAsDataURL(d.cropImage); }) : null })));
-  const blob = new Blob([JSON.stringify({ videos: await all("videos"), discoveries: ds }, null, 2)], { type: "application/json" });
+  const moments = await Promise.all((await DB.all("moments")).map(async (m) => ({ ...m, crop: m.crop ? await toData(m.crop) : null })));
+  const blob = new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), videos: await DB.all("videos"), moments }, null, 2)], { type: "application/json" });
   const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "billy-export.json"; a.click();
 };
 
 // ---------- Settings ----------
-chrome.storage.local.get("apiKey", (r) => { if (r.apiKey) $("key").placeholder = "Saved ••••••"; else document.querySelector('[data-tab="settings"]').click(); });
-$("save").onclick = async () => { const k = $("key").value.trim(); if (!k) return; await chrome.storage.local.set({ apiKey: k }); $("key").value = ""; $("key").placeholder = "Saved ••••••"; $("keyStatus").textContent = "Saved."; };
-$("test").onclick = async () => { $("keyStatus").textContent = "Testing…"; const r = await call({ type: "testKey" }); $("keyStatus").textContent = r.ok ? "Key works ✓" : r.error; };
+chrome.storage.local.get(["apiKey", "modelCache"], (r) => {
+  if (r.apiKey) $("key").placeholder = "Saved ••••••"; else show("settings");
+  if (r.modelCache) $("keyStatus").textContent = `Using ${r.modelCache.name}`;
+});
+$("save").onclick = async () => {
+  const k = $("key").value.trim(); if (!k) return;
+  await chrome.storage.local.set({ apiKey: k }); await chrome.storage.local.remove("modelCache");
+  $("key").value = ""; $("key").placeholder = "Saved ••••••"; $("test").click();
+};
+$("test").onclick = async () => {
+  $("keyStatus").textContent = "Testing…";
+  const r = await send({ t: "TEST_KEY" });
+  $("keyStatus").textContent = r?.ok ? `Key works ✓ — using ${r.model} (${r.ms} ms)` : (r?.error || r?.message || "No answer from Billy");
+};

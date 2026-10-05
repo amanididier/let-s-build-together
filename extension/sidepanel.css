@@ -20,3 +20,4 @@ pre{background:#1c1917;color:#fafaf9;padding:10px;border-radius:8px;overflow:aut
 .note{background:#fff4ee;border:1px solid #f6d3c4;padding:10px;border-radius:10px;margin-bottom:14px;font-size:13px}
 .tag{display:inline-block;font-size:11px;background:var(--line);border-radius:999px;padding:2px 8px;margin-right:4px}
 .thumb{width:100%;border-radius:8px;margin-bottom:6px}
+.small{font-size:12px}.err{border-color:#f0b4a4;color:#9a3412}.blk{margin:8px 0}
