@@ -10,17 +10,9 @@
     <button data-tab="settings">Settings</button>
   </nav>
   <main>
-    <section id="current">
-      <div id="empty" class="muted">Turn on <b>Watch together</b> on a YouTube video, pause, tap <b>Ask Billy</b> and draw a box.</div>
-      <div id="ask" hidden>
-        <img id="crop" alt="Your selection">
-        <div id="meta" class="muted"></div>
-        <form id="form"><textarea id="q" rows="2" placeholder="What did he do here?"></textarea><button>Ask</button></form>
-        <div id="answer"></div>
-      </div>
-    </section>
+    <section id="current"></section>
     <section id="library" hidden>
-      <input id="search" placeholder="Search your discoveries">
+      <input id="search" placeholder="Search everything you saved">
       <select id="filter"><option value="">All types</option></select>
       <div id="list"></div>
       <button id="export" class="ghost">Export JSON</button>
@@ -33,5 +25,6 @@
       <div id="keyStatus" class="muted"></div>
     </section>
   </main>
+  <script src="db.js"></script>
   <script src="sidepanel.js"></script>
 </body></html>
