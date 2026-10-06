@@ -1,30 +1,72 @@
 <!doctype html>
-<html><head><meta charset="utf-8"><link rel="stylesheet" href="sidepanel.css"><title>Billy</title></head>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <link rel="stylesheet" href="sidepanel.css">
+  <title>Billy</title>
+</head>
 <body>
-  <header><img src="icons/icon48.png" alt=""><b>Billy</b></header>
-  <nav>
-    <button data-tab="current" class="active">Current</button>
-    <button data-tab="library">Library</button>
-    <button data-tab="chat" disabled title="Phase 4">Chat</button>
-    <button data-tab="projects" disabled title="Phase 5">Projects</button>
-    <button data-tab="settings">Settings</button>
-  </nav>
+  <header class="topbar">
+    <button class="brand" data-view="home" aria-label="Open Billy home">
+      <img src="icons/icon48.png" alt=""><span>Billy</span>
+    </button>
+    <nav aria-label="Billy sections">
+      <button class="nav-button active" data-view="home" title="Now" aria-label="Now">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 3 10v11h6v-7h6v7h6V10L12 3Z"/></svg>
+      </button>
+      <button class="nav-button" data-view="library" title="Library" aria-label="Library">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h6v7H4V4Zm10 0h6v4h-6V4ZM4 15h6v5H4v-5Zm10-3h6v8h-6v-8Z"/></svg>
+      </button>
+      <button class="nav-button" data-view="settings" title="Settings" aria-label="Settings">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm8.5 4a7 7 0 0 0-.1-1.2l2-1.5-2-3.5-2.4 1a9 9 0 0 0-2-1.2L15.7 3h-4l-.3 2.6a9 9 0 0 0-2 1.2l-2.4-1-2 3.5 2 1.5A7 7 0 0 0 7 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.5 2.4-1a9 9 0 0 0 2 1.2l.3 2.6h4l.3-2.6a9 9 0 0 0 2-1.2l2.4 1 2-3.5-2-1.5c.1-.4.1-.8.1-1.2Z"/></svg>
+      </button>
+    </nav>
+  </header>
+
   <main>
-    <section id="current"></section>
-    <section id="library" hidden>
-      <input id="search" placeholder="Search everything you saved">
-      <select id="filter"><option value="">All types</option></select>
-      <div id="list"></div>
-      <button id="export" class="ghost">Export JSON</button>
+    <section id="home" class="view">
+      <div id="current"></div>
     </section>
-    <section id="settings" hidden>
-      <div id="privacy" class="note">Your crops, a few frames and nearby transcript go to Google through <b>your own Gemini key</b>. Google's free-tier terms may allow using that data. Nothing else leaves your computer.</div>
-      <label>Gemini API key <a href="https://aistudio.google.com/apikey" target="_blank">get one</a></label>
-      <input id="key" type="password" placeholder="AIza…">
-      <div class="row"><button id="save">Save</button><button id="test" class="ghost">Test key</button></div>
-      <div id="keyStatus" class="muted"></div>
+
+    <section id="library" class="view" hidden>
+      <div class="section-head">
+        <div><p class="eyebrow">Your collection</p><h1>Library</h1></div>
+        <button id="export" class="icon-button" title="Export library" aria-label="Export library">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0 5-5m-5 5-5-5M4 19h16"/></svg>
+        </button>
+      </div>
+      <label class="search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m16 16 5 5"/></svg><input id="search" placeholder="Search moments, videos, text…"></label>
+      <div class="segmented" role="tablist">
+        <button class="active" data-kind="all" role="tab">All</button>
+        <button data-kind="image" role="tab">Images</button>
+        <button data-kind="clip" role="tab">Clips</button>
+      </div>
+      <div id="libraryGrid" class="masonry"></div>
+    </section>
+
+    <section id="detail" class="view" hidden>
+      <button id="detailBack" class="back-button">← Library</button>
+      <div id="detailBody"></div>
+    </section>
+
+    <section id="settings" class="view" hidden>
+      <div class="section-head"><div><p class="eyebrow">Private by default</p><h1>Settings</h1></div></div>
+      <div class="setting-block">
+        <div class="setting-title"><span>Gemini API key</span><a href="https://aistudio.google.com/apikey" target="_blank">Get a key ↗</a></div>
+        <p>Your key stays in this browser. Only the crop, nearby frames, and transcript are sent when you use Ask or Copy.</p>
+        <div class="key-row"><input id="key" type="password" autocomplete="off" placeholder="AIza…"><button id="saveKey">Save & test</button></div>
+        <div id="keyStatus" class="status-line"></div>
+      </div>
+      <div class="setting-block">
+        <div class="setting-title"><span>Diagnostics</span><button id="runDiagnostics" class="text-button">Run checks</button></div>
+        <div id="diagnostics" class="diagnostics"><p class="muted">Check capture, storage, messaging, and your key.</p></div>
+        <button id="copyDiagnostics" class="secondary" hidden>Copy results</button>
+      </div>
     </section>
   </main>
+
   <script src="db.js"></script>
   <script src="sidepanel.js"></script>
-</body></html>
+</body>
+</html>

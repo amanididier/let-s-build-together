@@ -1,117 +1,152 @@
-// Billy side panel: Current | Library | Settings. Reads the last result from session storage, library from IndexedDB (db.js).
-const $ = (id) => document.getElementById(id);
-const fmt = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
-const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-const TYPES = ["inspiration", "visual_step", "code", "command", "website", "tool", "idea", "note", "learning"];
-const send = (msg) => new Promise((res) => chrome.runtime.sendMessage(msg, (r) => res(chrome.runtime.lastError ? { state: "error", message: chrome.runtime.lastError.message } : r)));
+// Billy side panel. One workspace: Now, Library and Settings.
+const byId = (id) => document.getElementById(id);
+const safe = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
+const formatTime = (seconds = 0) => `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;
+const send = (message) => new Promise((resolve) => chrome.runtime.sendMessage(message, (response) => resolve(chrome.runtime.lastError ? { state: "error", message: chrome.runtime.lastError.message } : response)));
+const objectUrls = [];
+let activeKind = "all";
+let openMoment = null;
+let diagnosticsText = "";
 
-// ---------- Tabs ----------
-function show(tab) {
-  document.querySelectorAll("nav button").forEach((x) => x.classList.toggle("active", x.dataset.tab === tab));
-  document.querySelectorAll("main section").forEach((s) => (s.hidden = s.id !== tab));
-  if (tab === "library") renderLibrary();
+function showView(name) {
+  document.querySelectorAll(".view").forEach((view) => { view.hidden = view.id !== name; });
+  document.querySelectorAll("[data-view]").forEach((button) => button.classList.toggle("active", button.dataset.view === name));
+  if (name === "library") renderLibrary();
 }
-document.querySelectorAll("nav button").forEach((b) => (b.onclick = () => show(b.dataset.tab)));
+document.querySelectorAll("[data-view]").forEach((button) => { button.onclick = () => showView(button.dataset.view); });
 
-// ---------- Seek: jump the open tab if it's the same video, else open a new tab ----------
-async function seek(videoId, sec, tabId) {
-  const tabs = tabId ? [{ id: tabId }] : await chrome.tabs.query({ url: "https://www.youtube.com/*" }).catch(() => []);
-  for (const t of tabs) {
-    const r = await chrome.tabs.sendMessage(t.id, { t: "SEEK", videoId, sec }).catch(() => null);
-    if (r?.ok) { chrome.tabs.update(t.id, { active: true }).catch(() => {}); return; }
+async function seek(videoId, seconds, tabId) {
+  const candidates = tabId ? [{ id: tabId }] : await chrome.tabs.query({ url: "https://www.youtube.com/*" }).catch(() => []);
+  for (const tab of candidates) {
+    const result = await chrome.tabs.sendMessage(tab.id, { t: "SEEK", videoId, sec: seconds }).catch(() => null);
+    if (result?.ok) {
+      await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
+      return;
+    }
   }
-  chrome.tabs.create({ url: `https://www.youtube.com/watch?v=${videoId}&t=${Math.floor(sec)}s` });
+  await chrome.tabs.create({ url: `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}&t=${Math.floor(seconds)}s` });
 }
 
-const list = (cls, title, arr) => (arr?.length ? `<div class="${cls}"><h4>${title}</h4><ul>${arr.map((x) => `<li>${esc(x)}</li>`).join("")}</ul></div>` : "");
-const blocks = (bs) => (bs || []).map((b, i) => `<div class="blk"><div class="muted small">${esc(b.kind)}${b.confidence && b.confidence !== "high" ? ` · ${b.confidence} confidence` : ""}</div><pre>${esc(b.content)}</pre>${b.uncertain?.length ? `<div class="muted small">Unsure: ${esc(b.uncertain.join("; "))}</div>` : ""}<button class="ghost copy" data-i="${i}">Copy</button></div>`).join("");
-const steps = (st) => (st?.length ? `<h4>Steps</h4><ol>${st.map((s) => `<li>${s.timestampSec != null ? `<span class="ts" data-t="${s.timestampSec}">${fmt(s.timestampSec)}</span> ` : ""}${esc(s.text)}</li>`).join("")}</ol>` : "");
-function bind(el, items, videoId, tabId) {
-  el.querySelectorAll(".copy").forEach((b) => (b.onclick = async () => { await navigator.clipboard.writeText(items[b.dataset.i].content); b.textContent = "Copied ✓"; }));
-  el.querySelectorAll(".ts").forEach((s) => (s.onclick = () => seek(videoId, +s.dataset.t, tabId)));
+function artifactsHtml(items = []) {
+  return items.map((item, index) => `<div class="artifact">
+    <div class="artifact-head"><span class="artifact-kind">${safe(item.kind)}${item.confidence && item.confidence !== "high" ? ` · ${safe(item.confidence)}` : ""}</span><div class="artifact-actions">${item.kind === "url" ? `<button class="mini open-artifact" data-index="${index}">Open</button>` : ""}<button class="mini copy-artifact" data-index="${index}">Copy</button></div></div>
+    <pre>${safe(item.content)}</pre>${item.uncertain?.length ? `<div class="uncertain">Check: ${safe(item.uncertain.join("; "))}</div>` : ""}
+  </div>`).join("");
 }
 
-// ---------- Current ----------
+function bindArtifacts(container, items = []) {
+  container.querySelectorAll(".copy-artifact").forEach((button) => { button.onclick = async () => { const item = items[Number(button.dataset.index)]; if (!item) return; await navigator.clipboard.writeText(item.content); button.textContent = "Copied"; }; });
+  container.querySelectorAll(".open-artifact").forEach((button) => { button.onclick = () => { const item = items[Number(button.dataset.index)]; if (item?.content) chrome.tabs.create({ url: /^https?:\/\//i.test(item.content) ? item.content : `https://${item.content}` }); }; });
+}
+
+function factGroup(label, className, values = []) {
+  return values.length ? `<div class="fact-group ${className}"><h3>${label}</h3><ul>${values.map((value) => `<li>${safe(value)}</li>`).join("")}</ul></div>` : "";
+}
+
 async function renderCurrent() {
+  const current = byId("current");
   const { last } = await chrome.storage.session.get("last");
-  const el = $("current");
-  if (!last) { el.innerHTML = `<div class="muted">Turn on <b>Watch together</b> on a YouTube video, pause, draw a box, then pick <b>Ask</b> or <b>Copy</b>.</div>`; return; }
-  const { p, kind, state, result, question, tabId } = last;
-  const head = `<img id="crop" src="${p.cropB64}" alt="Your box"><div class="muted">${esc(p.titleGuess)} · <span class="ts" data-t="${p.timestampSec}">${fmt(p.timestampSec)}</span>${p.transcriptWindow ? "" : " · no transcript"}</div>${question ? `<p><b>You asked:</b> ${esc(question)}</p>` : ""}`;
+  if (!last) {
+    current.innerHTML = `<div class="welcome"><div class="welcome-mark"><img src="icons/icon48.png" alt=""></div><p class="eyebrow">Ready when you are</p><h1>Understand any moment.</h1><p>On YouTube, turn Billy on, pause, and draw around what matters.</p><div class="flow"><div><b>01</b>Pause</div><div><b>02</b>Point</div><div><b>03</b>Ask, save or copy</div></div></div>`;
+    return;
+  }
+  const { p = {}, kind, state, result = {}, question, tabId, error, model } = last;
+  const source = `${safe(p.titleGuess || "YouTube moment")} · ${formatTime(p.timestampSec || p.startSec)}`;
+  const image = p.cropB64 || p.thumbnailB64;
   let body = "";
-  if (state === "working") body = `<div class="card muted">${kind === "ASK" ? "Billy is looking…" : "Reading the box…"}</div>`;
-  else if (state === "error") body = `<div class="card err">${esc(last.error)}</div>`;
-  else if (kind === "ASK") body = `<div class="card"><p>${esc(result.answer)}</p>${list("obs", "Observed", result.observed)}${list("inf", "Inferred", result.inferred)}${list("cant", "Can't tell", result.cannotTell)}${steps(result.steps)}${result.copyBlocks.length ? "<h4>Copy</h4>" + blocks(result.copyBlocks) : ""}</div>`;
-  else body = `<div class="card">${result.artifacts.length ? blocks(result.artifacts) : `<p class="muted">${esc(result.note || "Nothing readable in the box.")}</p>`}</div>`;
-  const canSave = state === "done";
-  el.innerHTML = head + body + (canSave ? `<div class="row"><button id="remember">Save to library</button><button class="ghost" id="again">Watch again</button></div><div class="muted small">Model: ${esc(last.model)}</div>` : "");
-  const items = kind === "ASK" ? result?.copyBlocks : result?.artifacts;
-  bind(el, items || [], p.videoId, tabId);
-  if (!canSave) return;
-  $("again").onclick = () => seek(p.videoId, p.timestampSec, tabId);
-  $("remember").onclick = async () => {
-    const sd = result.suggestedDiscovery, a0 = result.artifacts?.[0];
-    const title = prompt("Title", sd?.title || a0?.content?.slice(0, 60) || p.titleGuess);
-    if (title === null) return;
-    const btn = $("remember"); btn.disabled = true; btn.textContent = "Saving…";
-    const r = await send({ t: "SAVE", p, extra: {
-      title, type: sd?.type || (a0 ? KIND_TO_TYPE[a0.kind] : "note"), tags: sd?.tags || [], question: question || "",
-      answer: kind === "ASK" ? result : null, artifacts: kind === "COPY" ? result.artifacts : result.copyBlocks,
-    } });
-    btn.textContent = r?.state === "done" ? "Saved ✓" : (r?.message || "Failed"); if (r?.state !== "done") btn.disabled = false;
+  if (state === "working") body = `<div class="status-card">${kind === "COPY" ? "Reading exactly what is inside your box…" : "Billy is looking at this moment…"}</div>`;
+  if (state === "error") body = `<div class="status-card error"><b>Billy could not finish</b><br>${safe(error || "Try again from the video.")}</div>`;
+  if (state === "done" && (kind === "ASK" || kind === "CLIP_ASK")) {
+    body = `<div class="answer">${question ? `<p class="question">You asked: ${safe(question)}</p>` : ""}<p class="lead">${safe(result.answer)}</p>${factGroup("Observed", "observed", result.observed)}${factGroup("Inferred", "inferred", result.inferred)}${factGroup("Can't tell", "cannot", result.cannotTell)}${result.steps?.length ? `<div class="fact-group"><h3>Steps</h3><ol class="steps">${result.steps.map((step) => `<li>${safe(step.text)}</li>`).join("")}</ol></div>` : ""}${artifactsHtml(result.copyBlocks)}</div>`;
+  }
+  if (state === "done" && kind === "COPY") body = `<div class="answer">${result.artifacts?.length ? artifactsHtml(result.artifacts) : `<div class="status-card">${safe(result.note || "Nothing readable was found inside the box.")}</div>`}</div>`;
+  current.innerHTML = `${image ? `<div class="capture"><img src="${image}" alt="Selected video area"><div class="source">${source}</div></div>` : ""}${body}${state === "done" ? `<div class="action-row"><button id="remember" class="primary">Save to library</button><button id="watchAgain" class="secondary">Watch again</button></div><div class="status-line">${model ? `Answered with ${safe(model)}` : "Saved locally"}</div>` : ""}`;
+  const items = kind === "COPY" ? result.artifacts : result.copyBlocks;
+  bindArtifacts(current, items || []);
+  if (state !== "done") return;
+  byId("watchAgain").onclick = () => seek(p.videoId, p.timestampSec ?? p.startSec, tabId);
+  byId("remember").onclick = async () => {
+    const button = byId("remember"); button.disabled = true; button.textContent = "Saving…";
+    const suggested = result.suggestedDiscovery || {};
+    const response = await send({ t: kind === "CLIP_ASK" ? "CLIP_SAVE" : "SAVE", p, extra: { title: suggested.title || result.artifacts?.[0]?.content?.slice(0, 70) || p.titleGuess, type: suggested.type || "note", tags: suggested.tags || [], question: question || "", answer: kind.includes("ASK") ? result : null, artifacts: items || [] } });
+    button.textContent = response?.state === "done" ? "Saved" : "Try again"; button.disabled = response?.state === "done";
   };
 }
-chrome.storage.session.onChanged.addListener((c) => {
-  if (c.last) { renderCurrent(); if (c.last.newValue?.state === "working") show("current"); }
-  if (c.libraryChanged && !$("library").hidden) renderLibrary();
-});
-renderCurrent();
 
-// ---------- Library ----------
-TYPES.forEach((t) => $("filter").insertAdjacentHTML("beforeend", `<option>${t}</option>`));
-$("search").oninput = renderLibrary; $("filter").onchange = renderLibrary;
-const urls = [];
+chrome.storage.session.onChanged.addListener((changes) => { if (changes.last) { showView("home"); renderCurrent(); } if (changes.libraryChanged && !byId("library").hidden) renderLibrary(); });
+
+document.querySelectorAll("[data-kind]").forEach((button) => { button.onclick = () => { activeKind = button.dataset.kind; document.querySelectorAll("[data-kind]").forEach((item) => item.classList.toggle("active", item === button)); renderLibrary(); }; });
+byId("search").oninput = renderLibrary;
+
 async function renderLibrary() {
-  urls.splice(0).forEach(URL.revokeObjectURL);
-  const q = $("search").value.toLowerCase().split(/\s+/).filter(Boolean), type = $("filter").value;
-  const items = (await DB.all("moments")).sort((a, b) => b.createdAt - a.createdAt).filter((m) => {
-    if (type && m.type !== type) return false;
-    const hay = [m.title, m.question, m.videoTitle, m.channel, m.answer?.answer, ...(m.tags || []), ...(m.artifacts || []).map((a) => a.content), m.transcript].join(" ").toLowerCase();
-    return q.every((w) => hay.includes(w));
+  objectUrls.splice(0).forEach((url) => URL.revokeObjectURL(url));
+  const terms = byId("search").value.toLowerCase().split(/\s+/).filter(Boolean);
+  const moments = (await DB.all("moments")).sort((a, b) => b.createdAt - a.createdAt).filter((moment) => {
+    if (activeKind !== "all" && moment.kind !== activeKind) return false;
+    const searchable = [moment.title, moment.videoTitle, moment.channel, moment.question, moment.answer?.answer, moment.transcript, ...(moment.tags || []), ...(moment.artifacts || []).map((item) => item.content)].join(" ").toLowerCase();
+    return terms.every((term) => searchable.includes(term));
   });
-  $("list").innerHTML = items.length ? "" : `<p class="muted">${q.length || type ? "No matches." : "Nothing saved yet. Draw a box on a paused video and hit Save."}</p>`;
-  for (const m of items) {
-    const el = document.createElement("div"); el.className = "card";
-    const src = m.crop ? URL.createObjectURL(m.crop) : ""; if (src) urls.push(src);
-    el.innerHTML = `${src ? `<img class="thumb" src="${src}">` : ""}<b>${esc(m.title)}</b>
-      <div class="muted">${esc(m.videoTitle)} · <span class="ts" data-t="${m.startSec}">${fmt(m.startSec)}</span></div>
-      <div><span class="tag">${esc(m.type)}</span>${(m.tags || []).map((t) => `<span class="tag">${esc(t)}</span>`).join("")}</div>
-      ${m.question ? `<p class="muted">Q: ${esc(m.question)}</p>` : ""}${m.answer?.answer ? `<p>${esc(m.answer.answer)}</p>` : ""}${blocks(m.artifacts)}
-      <div class="row"><button class="ghost del">Delete</button></div>`;
-    bind(el, m.artifacts || [], m.videoId);
-    el.querySelector(".del").onclick = async () => { if (confirm("Delete this?")) { await DB.del("moments", m.id); renderLibrary(); } };
-    $("list").appendChild(el);
-  }
+  const grid = byId("libraryGrid");
+  if (!moments.length) { grid.innerHTML = `<div class="empty">${terms.length || activeKind !== "all" ? "No matching moments." : "Saved boxes and focused clips will appear here."}</div>`; return; }
+  grid.innerHTML = "";
+  moments.forEach((moment) => {
+    const card = document.createElement("article"); card.className = "moment"; card.dataset.id = moment.id;
+    const blob = moment.crop || moment.thumbnail;
+    const source = blob ? URL.createObjectURL(blob) : ""; if (source) objectUrls.push(source);
+    card.innerHTML = `${source ? `<div class="thumb-wrap"><img src="${source}" alt="">${moment.kind === "clip" ? `<span class="clip-badge">${formatTime(moment.endSec - moment.startSec)} clip</span>` : ""}</div>` : ""}<div class="moment-body"><div class="moment-title">${safe(moment.title || moment.videoTitle)}</div><div class="moment-meta">${formatTime(moment.startSec)} · ${safe(moment.channel || "YouTube")}</div></div>`;
+    card.onclick = () => openDetail(moment);
+    grid.appendChild(card);
+  });
 }
-const toData = (b) => new Promise((r) => { const f = new FileReader(); f.onload = () => r(f.result); f.readAsDataURL(b); });
-$("export").onclick = async () => {
-  const moments = await Promise.all((await DB.all("moments")).map(async (m) => ({ ...m, crop: m.crop ? await toData(m.crop) : null })));
-  const blob = new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), videos: await DB.all("videos"), moments }, null, 2)], { type: "application/json" });
-  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "billy-export.json"; a.click();
+
+async function openDetail(moment) {
+  openMoment = moment;
+  const blob = moment.crop || moment.thumbnail;
+  const source = blob ? URL.createObjectURL(blob) : ""; if (source) objectUrls.push(source);
+  const answer = moment.answer || {};
+  byId("detailBody").innerHTML = `${source ? `<img class="detail-image" src="${source}" alt="Saved moment">` : ""}<h1 class="detail-title">${safe(moment.title)}</h1><div class="detail-source">${safe(moment.videoTitle)} · ${formatTime(moment.startSec)}${moment.endSec != null ? `–${formatTime(moment.endSec)}` : ""}</div>${answer.answer ? `<div class="detail-answer"><p class="lead">${safe(answer.answer)}</p>${factGroup("Observed", "observed", answer.observed)}${factGroup("Inferred", "inferred", answer.inferred)}${factGroup("Can't tell", "cannot", answer.cannotTell)}</div>` : ""}${artifactsHtml(moment.artifacts)}<div class="action-row"><button id="detailWatch" class="primary">Watch again</button><button id="detailDelete" class="secondary danger">Delete</button></div>`;
+  bindArtifacts(byId("detailBody"), moment.artifacts || []);
+  byId("detailWatch").onclick = () => seek(moment.videoId, moment.startSec);
+  byId("detailDelete").onclick = async () => { if (!confirm("Delete this saved moment?")) return; await DB.del("moments", moment.id); openMoment = null; showView("library"); };
+  showView("detail");
+}
+byId("detailBack").onclick = () => showView("library");
+
+const blobToDataUrl = (blob) => new Promise((resolve) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.readAsDataURL(blob); });
+byId("export").onclick = async () => {
+  const moments = await Promise.all((await DB.all("moments")).map(async (moment) => ({ ...moment, crop: moment.crop ? await blobToDataUrl(moment.crop) : null, thumbnail: moment.thumbnail ? await blobToDataUrl(moment.thumbnail) : null })));
+  const data = new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), videos: await DB.all("videos"), moments }, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(data); const anchor = document.createElement("a"); anchor.href = url; anchor.download = "billy-library.json"; anchor.click(); URL.revokeObjectURL(url);
 };
 
-// ---------- Settings ----------
-chrome.storage.local.get(["apiKey", "modelCache"], (r) => {
-  if (r.apiKey) $("key").placeholder = "Saved ••••••"; else show("settings");
-  if (r.modelCache) $("keyStatus").textContent = `Using ${r.modelCache.name}`;
+chrome.storage.local.get(["apiKey", "modelCache"], (stored) => {
+  if (stored.apiKey) byId("key").placeholder = "Saved securely";
+  if (stored.modelCache?.name) { byId("keyStatus").textContent = `Ready · ${stored.modelCache.name}`; byId("keyStatus").className = "status-line good"; }
+  if (!stored.apiKey) showView("settings");
 });
-$("save").onclick = async () => {
-  const k = $("key").value.trim(); if (!k) return;
-  await chrome.storage.local.set({ apiKey: k }); await chrome.storage.local.remove("modelCache");
-  $("key").value = ""; $("key").placeholder = "Saved ••••••"; $("test").click();
+byId("saveKey").onclick = async () => {
+  const key = byId("key").value.trim();
+  if (!/^AIza[\w-]{20,}$/.test(key)) { byId("keyStatus").textContent = "Paste the complete key beginning with AIza."; byId("keyStatus").className = "status-line bad"; return; }
+  await chrome.storage.local.set({ apiKey: key }); await chrome.storage.local.remove("modelCache"); byId("key").value = ""; byId("key").placeholder = "Saved securely";
+  byId("keyStatus").textContent = "Testing…"; byId("keyStatus").className = "status-line";
+  const result = await send({ t: "TEST_KEY" });
+  byId("keyStatus").textContent = result?.ok ? `Key works · ${result.model}` : (result?.error || result?.message || "Billy did not answer."); byId("keyStatus").className = `status-line ${result?.ok ? "good" : "bad"}`;
 };
-$("test").onclick = async () => {
-  $("keyStatus").textContent = "Testing…";
-  const r = await send({ t: "TEST_KEY" });
-  $("keyStatus").textContent = r?.ok ? `Key works ✓ — using ${r.model} (${r.ms} ms)` : (r?.error || r?.message || "No answer from Billy");
+
+byId("runDiagnostics").onclick = async () => {
+  const diagnostics = byId("diagnostics"); diagnostics.innerHTML = `<p class="muted">Running checks…</p>`;
+  const [ping, tabs, storage] = await Promise.all([send({ t: "PING" }), chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []), (async () => { try { const id = `diag-${Date.now()}`; await DB.put("diag", { id, ok: true }); const row = await DB.get("diag", id); await DB.del("diag", id); return !!row?.ok; } catch { return false; } })()]);
+  const activeTab = tabs[0]; const capture = activeTab?.id ? await chrome.tabs.sendMessage(activeTab.id, { t: "DIAG" }).catch(() => null) : null;
+  const keyTest = await send({ t: "TEST_KEY" });
+  const checks = [
+    ["Billy messaging", !!ping?.ok, ping?.ok ? "ready" : "not responding"], ["Local library", storage, storage ? "read and write ready" : "storage failed"],
+    ["YouTube video", !!capture?.onVideo, capture?.onVideo ? "found" : "open a YouTube video"], ["Frame capture", !!capture?.frame && !capture?.black, capture?.black ? "video returned a black frame" : capture?.frame ? "ready" : "not available"],
+    ["Focus crop", !!capture?.crop, capture?.crop ? "math passed" : "not checked"], ["Captions", !!capture?.captions, capture?.captions ? `${capture.captions} lines · ${capture.captionsSource}` : "frames only"],
+    ["Gemini key", !!keyTest?.ok, keyTest?.ok ? keyTest.model : (keyTest?.error || "not ready")],
+  ];
+  diagnostics.innerHTML = checks.map(([name, ok, detail]) => `<div class="check"><span>${safe(name)}<br><small class="muted">${safe(detail)}</small></span><b class="${ok ? "good" : "bad"}">${ok ? "✓" : "×"}</b></div>`).join("");
+  diagnosticsText = checks.map(([name, ok, detail]) => `${ok ? "PASS" : "CHECK"} — ${name}: ${detail}`).join("\n"); byId("copyDiagnostics").hidden = false;
 };
+byId("copyDiagnostics").onclick = async () => { await navigator.clipboard.writeText(diagnosticsText); byId("copyDiagnostics").textContent = "Copied"; };
+
+renderCurrent();

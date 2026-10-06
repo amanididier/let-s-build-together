@@ -10,3 +10,4 @@
 <!-- LOVABLE:END -->
 
 - Billy Chrome extension source lives in extension/ (plain MV3 JS, no build step); re-zip into public/billy-extension.zip after edits — so it loads unpacked directly.
+- Keep Billy's extension UI to working Now, Library, moment-detail, and Settings surfaces; this prevents placeholder pages from obscuring the capture-first product.
