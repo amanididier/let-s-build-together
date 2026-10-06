@@ -44,3 +44,19 @@ async function saveMoment(p, extra = {}) {
   await DB.put("moments", m);
   return m;
 }
+
+async function saveClipMoment(p, extra = {}) {
+  const now = Date.now();
+  const thumbnail = await (await fetch(p.thumbnailB64 || p.samples?.[0]?.b64 || p.cropB64)).blob();
+  const sampleBlobs = await Promise.all((p.samples || []).slice(0, 8).map(async (sample) => ({ tSec: sample.tSec, image: await (await fetch(sample.b64)).blob() })));
+  await DB.put("videos", { id: p.videoId, title: p.titleGuess, channel: p.channel || "", url: `https://www.youtube.com/watch?v=${p.videoId}`, lastWatchedAt: now });
+  const moment = {
+    id: crypto.randomUUID(), videoId: p.videoId, videoTitle: p.titleGuess, channel: p.channel || "", kind: "clip",
+    startSec: p.startSec, endSec: p.endSec, box: p.box, thumbnail, samples: sampleBlobs, transcript: p.transcriptWindow || "",
+    title: extra.title || `${p.titleGuess} · ${Math.floor(p.startSec / 60)}:${String(p.startSec % 60).padStart(2, "0")}–${Math.floor(p.endSec / 60)}:${String(p.endSec % 60).padStart(2, "0")}`,
+    type: extra.type || "visual_step", tags: extra.tags || [], question: extra.question || "", answer: extra.answer || null,
+    artifacts: extra.artifacts || [], createdAt: now, updatedAt: now, syncStatus: "pending",
+  };
+  await DB.put("moments", moment);
+  return moment;
+}

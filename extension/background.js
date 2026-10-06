@@ -138,6 +138,7 @@ function validCopy(o) {
 const P_ASK = `You are Billy, watching a video with the user. Inputs: CROP (the exact area the user boxed), the CURRENT FRAME, some earlier frames, the TRANSCRIPT within ±30 s, the video title and timestamp, and the user's QUESTION. Answer about the crop, using the other inputs to understand what happened just before.
 Rules: separate observed (clearly visible or spoken) from inferred (start each with "Probably"). If text is too small, blurry, or the action isn't visible, put it in cannotTell — never guess. Never invent a click, setting, command or code. Exact commands/code go in copyBlocks, copied character-for-character; if a character is unclear, say so. For silent procedures give numbered steps with approximate timestamps. Be short and plain. JSON only.`;
 const P_COPY = `You are Billy. The user boxed something in a video and pressed Copy. Inputs: CROP (the boxed area), the current frame, and the transcript within ±30 seconds. Return exactly what is written in the crop, character for character, as artifacts. Use the transcript only for context. Do not autocorrect, do not add "https://" unless visible, keep case and spacing. If a character is ambiguous, set confidence lower and describe it in "uncertain". If nothing readable is in the crop, return an empty artifacts list and explain in note. JSON only.`;
+const P_CLIP = `You are Billy. The user focused on one region of a YouTube video over a short time range. Inputs are cropped samples in time order, timestamps, nearby transcript, source, and a QUESTION. Explain only what changes inside that region. Separate clearly observed facts from inferences. If samples are too sparse to explain the movement, say so in cannotTell and suggest a shorter focus. Never invent a click, setting, command, or hidden action. Give concise steps when visible. JSON only.`;
 
 const img = (d) => ({ inline_data: { mime_type: "image/jpeg", data: d.split(",")[1] } });
 const ctx = (p) => ({ text: `Video: "${p.titleGuess}" ${p.channel ? `by ${p.channel}` : ""}. Paused at ${p.timestampSec}s. URL ${p.url}` });
@@ -158,22 +159,28 @@ const pauseAsk = (p, question) => structured([
 const copyExtract = (p) => structured([
   { text: P_COPY }, ctx(p), { text: "CROP:" }, img(p.cropB64), { text: "CURRENT FRAME:" }, img(p.currentFrameB64), tr(p),
 ], COPY_SCHEMA, validCopy);
+const clipAsk = (p, question) => structured([
+  { text: P_CLIP }, ctx(p), { text: `FOCUS RANGE: ${p.startSec}s to ${p.endSec}s` },
+  ...(p.samples || []).flatMap((sample) => [{ text: `CROP AT ${sample.tSec}s:` }, img(sample.b64)]),
+  tr(p), { text: `QUESTION: ${question}` },
+], ASK_SCHEMA, validAsk);
 
 // ---------- actions ----------
-const slim = (p) => ({ ...p, priorFramesB64: [] }); // keep session storage small
+const slim = (p) => ({ ...p, priorFramesB64: [], samples: (p.samples || []).slice(0, 8) }); // keep session storage small
 async function setLast(v) { await chrome.storage.session.set({ last: { ...v, at: Date.now() } }); }
 
 async function handle(msg, tabId) {
   const t0 = Date.now(), { p } = msg;
   try {
-    if (msg.t === "SAVE") {
-      const m = await saveMoment(p, msg.extra);
-      await log("SAVE", "done", { id: p.requestId, ms: Date.now() - t0 });
+    if (!p) return { state: "error", message: "Billy did not receive the selected moment." };
+    if (msg.t === "SAVE" || msg.t === "CLIP_SAVE") {
+      const m = msg.t === "CLIP_SAVE" ? await saveClipMoment(p, msg.extra) : await saveMoment(p, msg.extra);
+      await log(msg.t, "done", { id: p.requestId, ms: Date.now() - t0 });
       chrome.storage.session.set({ libraryChanged: Date.now() });
       return { state: "done", message: "Saved to your library", id: m.id };
     }
     await setLast({ kind: msg.t, state: "working", p: slim(p), question: msg.question, tabId });
-    const r = msg.t === "ASK" ? await pauseAsk(p, msg.question) : await copyExtract(p);
+    const r = msg.t === "ASK" ? await pauseAsk(p, msg.question) : msg.t === "CLIP_ASK" ? await clipAsk(p, msg.question) : await copyExtract(p);
     await setLast({ kind: msg.t, state: "done", p: slim(p), question: msg.question, tabId, result: r.data, model: r.model });
     await log(msg.t, "done", { id: p.requestId, ms: Date.now() - t0, model: r.model });
     const n = r.data.artifacts?.length;
@@ -199,8 +206,8 @@ async function testKey() {
 
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   const tabId = msg.tabId ?? sender.tab?.id;
-  if (msg.t === "ASK" || msg.t === "COPY") { if (sender.tab) chrome.sidePanel.open({ tabId }).catch(() => {}); }
-  if (["SAVE", "ASK", "COPY"].includes(msg.t)) { handle(msg, tabId).then(reply); return true; }
+  if (["ASK", "COPY", "CLIP_ASK"].includes(msg.t)) { if (sender.tab) chrome.sidePanel.open({ tabId }).catch(() => {}); }
+  if (["SAVE", "ASK", "COPY", "CLIP_SAVE", "CLIP_ASK"].includes(msg.t)) { handle(msg, tabId).then(reply); return true; }
   if (msg.t === "WATCH_GET") { chrome.storage.local.get("watchOn").then((r) => reply({ on: !!r.watchOn })); return true; }
   if (msg.t === "WATCH_SET") { chrome.storage.local.set({ watchOn: !!msg.on }).then(() => reply({ ok: true })); log("WATCH_SET", msg.on ? "on" : "off"); return true; }
   if (msg.t === "PING") { reply({ ok: true, at: Date.now() }); return; }

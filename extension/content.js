@@ -4,7 +4,7 @@
   if (window.__billy) return; window.__billy = true;
   let on = false, video = null, player = null, frames = [], timer = null;
   let captions = null, captionsFor = null, captionsSource = "none";
-  let snap = null, start = null, payload = null;
+  let snap = null, start = null, payload = null, focus = null, focusTimer = null;
 
   const host = document.createElement("div");
   host.style.cssText = "position:absolute;inset:0;pointer-events:none;z-index:70";
@@ -31,7 +31,7 @@
     @keyframes p{50%{opacity:.3}}
   </style>
   <button class="chip" id="toggle">Billy · Watch together</button>
-  <button class="chip" id="chip">Ask Billy</button>
+  <button class="chip" id="chip">Focus on a moment</button>
   <div id="layer" class="empty"><div id="hint">Drag a box around what you care about · Esc to cancel</div><div id="box"></div></div>
   <div id="pill"></div>`;
   const $ = (id) => root.getElementById(id);
@@ -72,7 +72,7 @@
     return !!video;
   }
 
-  function reset() { chip.style.display = "none"; layer.style.display = "none"; pill.style.display = "none"; box.style.display = "none"; snap = null; payload = null; start = null; }
+  function reset() { clearInterval(focusTimer); focusTimer = null; focus = null; chip.style.display = "none"; layer.style.display = "none"; pill.style.display = "none"; box.style.display = "none"; snap = null; payload = null; start = null; }
 
   function init() {
     clearInterval(timer); frames = []; reset();
@@ -85,11 +85,12 @@
       const c = grab(640); if (c) { frames.push(c.toDataURL("image/jpeg", 0.6)); if (frames.length > 10) frames.shift(); }
     }, 2000);
     video.addEventListener("pause", onPause);
-    video.addEventListener("play", reset);
+    video.addEventListener("play", onPlay);
     if (video.paused) onPause();
   }
-  function onPause() { if (on && !isAd() && !snap) chip.style.display = "block"; }
-  document.addEventListener("yt-navigate-finish", () => { if (video) { video.removeEventListener("pause", onPause); video.removeEventListener("play", reset); } init(); });
+  function onPause() { if (focus) { stopFocus(); return; } if (on && !isAd() && !snap) chip.style.display = "block"; }
+  function onPlay() { if (!focus) reset(); }
+  document.addEventListener("yt-navigate-finish", () => { if (video) { video.removeEventListener("pause", onPause); video.removeEventListener("play", onPlay); } init(); });
 
   // ---------- captions: caption track → open transcript panel → none ----------
   async function loadCaptions() {
@@ -188,7 +189,7 @@
     Object.assign(pill.style, { left: left + "px", top: top + "px" });
   }
   function actions() {
-    pill.innerHTML = `<button class="primary" data-a="save">Save</button><button data-a="ask">Ask</button><button data-a="copy">Copy</button><button data-a="x" title="Cancel (Esc)">✕</button>`;
+    pill.innerHTML = `<button class="primary" data-a="save">Save</button><button data-a="ask">Ask</button><button data-a="copy">Copy</button><button data-a="focus">Focus</button><button data-a="x" title="Cancel (Esc)">✕</button>`;
     placePill();
   }
   function status(text, err, retry) {
@@ -197,6 +198,43 @@
   }
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   let lastMsg = null;
+  function fingerprint(canvas) {
+    const c = document.createElement("canvas"); c.width = 8; c.height = 8; c.getContext("2d").drawImage(canvas, 0, 0, 8, 8);
+    const data = c.getContext("2d").getImageData(0, 0, 8, 8).data; const out = [];
+    for (let i = 0; i < data.length; i += 4) out.push(Math.round((data[i] + data[i + 1] + data[i + 2]) / 3));
+    return out;
+  }
+  const differs = (a, b) => !a || a.reduce((sum, value, i) => sum + Math.abs(value - b[i]), 0) / a.length > 8;
+  function focusStatus() {
+    const elapsed = Math.max(0, Math.floor(video.currentTime - focus.startSec));
+    pill.innerHTML = `<span class="st"><span class="dot"></span>Focusing ${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, "0")} · ${focus.samples.length} frames</span><button class="primary" data-a="stop">Stop</button>`;
+    placePill();
+  }
+  function sampleFocus() {
+    if (!focus || !video || video.paused || isAd()) return;
+    if (video.currentTime - focus.startSec >= 60) { video.pause(); return; }
+    const full = grab(960); if (!full || isBlack(full)) return;
+    const crop = cropFrom(full, focus.box), print = fingerprint(crop);
+    if (focus.samples.length < 24 && differs(focus.lastPrint, print)) {
+      focus.samples.push({ tSec: Math.floor(video.currentTime), b64: crop.toDataURL("image/jpeg", 0.72) }); focus.lastPrint = print;
+    }
+    focusStatus();
+  }
+  function startFocus() {
+    if (!payload) return;
+    focus = { startSec: video.currentTime, box: payload.box, samples: [{ tSec: payload.timestampSec, b64: payload.cropB64 }], lastPrint: null, base: payload };
+    layer.style.pointerEvents = "none"; box.style.boxShadow = "none"; box.style.background = "rgba(232,93,58,.04)";
+    focusStatus(); focusTimer = setInterval(sampleFocus, 500); video.play().catch(() => {});
+  }
+  function stopFocus() {
+    if (!focus) return;
+    clearInterval(focusTimer); focusTimer = null; sampleFocus();
+    const endSec = Math.max(focus.startSec + 1, video.currentTime);
+    payload = { ...focus.base, requestId: crypto.randomUUID(), kind: "clip", startSec: Math.floor(focus.startSec), endSec: Math.floor(endSec), timestampSec: Math.floor(focus.startSec), samples: focus.samples, thumbnailB64: focus.samples[0]?.b64 || focus.base.cropB64, transcriptWindow: windowText((focus.startSec + endSec) / 2) };
+    focus = null; layer.style.pointerEvents = "auto";
+    pill.innerHTML = `<span class="st">Focused ${formatDuration(payload.endSec - payload.startSec)} · ${payload.samples.length} frames</span><button class="primary" data-a="clip-save">Save</button><button data-a="clip-ask">Ask</button><button data-a="x">✕</button>`; placePill();
+  }
+  const formatDuration = (seconds) => `${Math.floor(seconds / 60)}:${String(Math.max(0, Math.floor(seconds % 60))).padStart(2, "0")}`;
   async function run(msg, workingText) {
     lastMsg = msg; status("…" + workingText);
     const r = await send(msg);
@@ -207,14 +245,18 @@
     const a = e.target.closest("button")?.dataset.a; if (!a) return;
     if (a === "x") { reset(); if (video?.paused) onPause(); return; }
     if (a === "retry" && lastMsg) return run(lastMsg, "Trying again…");
+    if (a === "stop") { video.pause(); stopFocus(); return; }
     if (!payload) return;
     if (a === "save") return run({ t: "SAVE", p: payload }, "Saving…");
     if (a === "copy") return run({ t: "COPY", p: payload }, "Reading the box…");
-    if (a === "ask") {
+    if (a === "focus") { startFocus(); return; }
+    if (a === "clip-save") return run({ t: "CLIP_SAVE", p: payload }, "Saving focused clip…");
+    if (a === "ask" || a === "clip-ask") {
       pill.innerHTML = `<form><input placeholder="Ask about this…" autofocus><button class="primary">Ask</button><button type="button" data-a="back">←</button></form>`;
       const f = pill.querySelector("form"), i = f.querySelector("input");
       f.style.display = "flex"; f.style.gap = "4px";
-      f.onsubmit = (ev) => { ev.preventDefault(); const q = i.value.trim(); if (q) run({ t: "ASK", p: payload, question: q }, "Billy is looking…"); };
+      const messageType = a === "clip-ask" ? "CLIP_ASK" : "ASK";
+      f.onsubmit = (ev) => { ev.preventDefault(); const q = i.value.trim(); if (q) run({ t: messageType, p: payload, question: q }, "Billy is looking…"); };
       placePill(); setTimeout(() => i.focus(), 0);
     }
     if (a === "back") actions();
