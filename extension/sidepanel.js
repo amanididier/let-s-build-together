@@ -126,7 +126,7 @@ chrome.storage.local.get(["apiKey", "modelCache"], (stored) => {
 });
 byId("saveKey").onclick = async () => {
   const key = byId("key").value.trim();
-  if (!/^AIza[\w-]{20,}$/.test(key)) { byId("keyStatus").textContent = "Paste the complete key beginning with AIza."; byId("keyStatus").className = "status-line bad"; return; }
+  if (!/^(AIza|AQ\.)[\w.-]{20,}$/.test(key)) { byId("keyStatus").textContent = "Paste the complete Gemini key (starts with AIza or AQ.)."; byId("keyStatus").className = "status-line bad"; return; }
   await chrome.storage.local.set({ apiKey: key }); await chrome.storage.local.remove("modelCache"); byId("key").value = ""; byId("key").placeholder = "Saved securely";
   byId("keyStatus").textContent = "Testing…"; byId("keyStatus").className = "status-line";
   const result = await send({ t: "TEST_KEY" });

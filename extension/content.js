@@ -266,7 +266,7 @@
   chrome.runtime.onMessage.addListener((m, _s, reply) => {
     if (m.t === "SEEK") {
       if (!video || vid() !== m.videoId) return reply({ ok: false });
-      video.currentTime = m.sec; reply({ ok: true });
+      video.currentTime = m.sec; video.pause(); reply({ ok: true });
     }
     if (m.t === "DIAG") {
       const out = { onVideo: !!vid(), video: !!(mount() && video.videoWidth) };
