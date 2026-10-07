@@ -73,7 +73,7 @@ async function pickModel(force = false) {
   return name;
 }
 
-async function generate(body, ms = 45000) {
+async function generate(body, ms = 150000) {
   const k = await key();
   let model = await pickModel(), refetched = false;
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -87,6 +87,9 @@ async function generate(body, ms = 45000) {
       return { text, model };
     }
     const e = await fromHttp(r);
+    if (r.status === 400 && body.generationConfig?.thinkingConfig && /thinking/i.test(e.message)) {
+      delete body.generationConfig.thinkingConfig; continue; // model doesn't accept the thinking setting
+    }
     if (e.code === "MODEL_NOT_FOUND" && !refetched) { refetched = true; model = await pickModel(true); continue; }
     if ((e.code === "RATE_LIMIT" || r.status >= 500) && attempt === 0) { await new Promise((s) => setTimeout(s, 2500)); continue; }
     throw e;
@@ -145,7 +148,8 @@ const ctx = (p) => ({ text: `Video: "${p.titleGuess}" ${p.channel ? `by ${p.chan
 const tr = (p) => ({ text: `TRANSCRIPT ±30s:\n${p.transcriptWindow || "(no transcript available — rely on images and say so)"}` });
 
 async function structured(parts, schema, check) {
-  const body = { contents: [{ role: "user", parts }], generationConfig: { responseMimeType: "application/json", responseSchema: schema } };
+  // Gemini 3.x "thinks" at high effort by default, which made answers take over 45 s. Low thinking keeps it fast.
+  const body = { contents: [{ role: "user", parts }], generationConfig: { responseMimeType: "application/json", responseSchema: schema, thinkingConfig: { thinkingLevel: "low" } } };
   for (let i = 0; i < 2; i++) {
     const { text, model } = await generate(body);
     try { return { data: check(JSON.parse(text)), model }; } catch { if (i) throw new AIError("BAD_RESPONSE"); }
