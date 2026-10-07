@@ -73,28 +73,71 @@ async function pickModel(force = false) {
   return name;
 }
 
-async function generate(body, ms = 150000) {
-  const k = await key();
-  let model = await pickModel(), refetched = false;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const r = await req(`${BASE}/models/${model}:generateContent`,
-      { method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": k }, body: JSON.stringify(body) }, ms);
-    if (r.ok) {
-      const j = await r.json();
-      if (j?.promptFeedback?.blockReason || j?.candidates?.[0]?.finishReason === "SAFETY") throw new AIError("BLOCKED");
-      const text = j?.candidates?.[0]?.content?.parts?.map((p) => p.text || "").join("") || "";
-      if (!text) throw new AIError("BAD_RESPONSE", "empty");
-      return { text, model };
+// WHY STREAMING: Chrome kills an extension service worker when a fetch() response takes more than
+// 30 s to arrive. Thinking models send nothing until they finish, so long answers silently died with
+// the worker. streamGenerateContent sends bytes (including short thought summaries) within seconds,
+// and a keep-alive extension API call every 20 s stops the idle timer from firing.
+async function keepAlive(promise) {
+  const t = setInterval(() => chrome.runtime.getPlatformInfo(() => {}), 20000);
+  try { return await promise; } finally { clearInterval(t); }
+}
+
+// idleMs = give up only if Google sends NOTHING for that long; hardMs stays under Chrome's 5-minute cap.
+async function streamCall(model, k, body, idleMs, hardMs = 240000) {
+  const c = new AbortController(), t0 = Date.now();
+  let idle, ttfb = 0, text = "", buf = "";
+  const arm = () => { clearTimeout(idle); idle = setTimeout(() => c.abort(), idleMs); };
+  const hard = setTimeout(() => c.abort(), hardMs);
+  const lost = (e) => new AIError(e?.name === "AbortError" ? "TIMEOUT" : "NETWORK");
+  const frame = (raw) => {
+    const data = raw.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("");
+    if (!data || data === "[DONE]") return;
+    let j; try { j = JSON.parse(data); } catch { return; }
+    if (j.error) throw new AIError("BAD_RESPONSE", String(j.error.message || "").slice(0, 120));
+    if (j.promptFeedback?.blockReason) throw new AIError("BLOCKED");
+    const cand = j.candidates?.[0];
+    if (["SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST"].includes(cand?.finishReason)) throw new AIError("BLOCKED");
+    for (const p of cand?.content?.parts || []) if (!p.thought && typeof p.text === "string") text += p.text;
+  };
+  arm();
+  try {
+    let r;
+    try {
+      r = await fetch(`${BASE}/models/${model}:streamGenerateContent?alt=sse`,
+        { method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": k }, body: JSON.stringify(body), signal: c.signal });
+    } catch (e) { throw lost(e); }
+    if (!r.ok) return { r };
+    const reader = r.body.getReader(), dec = new TextDecoder();
+    for (;;) {
+      let chunk; try { chunk = await reader.read(); } catch (e) { throw lost(e); }
+      if (chunk.done) break;
+      arm(); if (!ttfb) ttfb = Date.now() - t0;
+      buf += dec.decode(chunk.value, { stream: true }).replace(/\r/g, "");
+      let i; while ((i = buf.indexOf("\n\n")) >= 0) { frame(buf.slice(0, i)); buf = buf.slice(i + 2); }
     }
-    const e = await fromHttp(r);
-    if (r.status === 400 && body.generationConfig?.thinkingConfig && /thinking/i.test(e.message)) {
-      delete body.generationConfig.thinkingConfig; continue; // model doesn't accept the thinking setting
+    if (buf.trim()) frame(buf);
+    if (!text) throw new AIError("BAD_RESPONSE", "empty");
+    return { text, ttfb, ms: Date.now() - t0 };
+  } finally { clearTimeout(idle); clearTimeout(hard); }
+}
+
+async function generate(body, idleMs = 90000) {
+  return keepAlive((async () => {
+    const k = await key();
+    let model = await pickModel(), refetched = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const out = await streamCall(model, k, body, idleMs);
+      if (!out.r) return { ...out, model };
+      const r = out.r, e = await fromHttp(r);
+      if (r.status === 400 && body.generationConfig?.thinkingConfig && /thinking/i.test(e.message)) {
+        delete body.generationConfig.thinkingConfig; continue; // model doesn't accept the thinking setting
+      }
+      if (e.code === "MODEL_NOT_FOUND" && !refetched) { refetched = true; model = await pickModel(true); continue; }
+      if ((e.code === "RATE_LIMIT" || r.status >= 500) && attempt === 0) { await new Promise((s) => setTimeout(s, 2500)); continue; }
+      throw e;
     }
-    if (e.code === "MODEL_NOT_FOUND" && !refetched) { refetched = true; model = await pickModel(true); continue; }
-    if ((e.code === "RATE_LIMIT" || r.status >= 500) && attempt === 0) { await new Promise((s) => setTimeout(s, 2500)); continue; }
-    throw e;
-  }
-  throw new AIError("BAD_RESPONSE");
+    throw new AIError("BAD_RESPONSE");
+  })());
 }
 
 // ---------- schemas + validators ----------
@@ -148,11 +191,11 @@ const ctx = (p) => ({ text: `Video: "${p.titleGuess}" ${p.channel ? `by ${p.chan
 const tr = (p) => ({ text: `TRANSCRIPT ±30s:\n${p.transcriptWindow || "(no transcript available — rely on images and say so)"}` });
 
 async function structured(parts, schema, check) {
-  // Gemini 3.x "thinks" at high effort by default, which made answers take over 45 s. Low thinking keeps it fast.
-  const body = { contents: [{ role: "user", parts }], generationConfig: { responseMimeType: "application/json", responseSchema: schema, thinkingConfig: { thinkingLevel: "low" } } };
+  // Gemini 3.x "thinks" at high effort by default. Low thinking keeps it fast; includeThoughts makes it stream early bytes.
+  const body = { contents: [{ role: "user", parts }], generationConfig: { responseMimeType: "application/json", responseSchema: schema, thinkingConfig: { thinkingLevel: "low", includeThoughts: true } } };
   for (let i = 0; i < 2; i++) {
-    const { text, model } = await generate(body);
-    try { return { data: check(JSON.parse(text)), model }; } catch { if (i) throw new AIError("BAD_RESPONSE"); }
+    const { text, model, ttfb, ms } = await generate(body);
+    try { return { data: check(JSON.parse(text)), model, ttfb, ms }; } catch { if (i) throw new AIError("BAD_RESPONSE"); }
   }
 }
 const pauseAsk = (p, question) => structured([
