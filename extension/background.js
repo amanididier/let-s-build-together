@@ -87,6 +87,9 @@ async function generate(body, ms = 150000) {
       return { text, model };
     }
     const e = await fromHttp(r);
+    if (r.status === 400 && body.generationConfig?.thinkingConfig && /thinking/i.test(e.message)) {
+      delete body.generationConfig.thinkingConfig; continue; // model doesn't accept the thinking setting
+    }
     if (e.code === "MODEL_NOT_FOUND" && !refetched) { refetched = true; model = await pickModel(true); continue; }
     if ((e.code === "RATE_LIMIT" || r.status >= 500) && attempt === 0) { await new Promise((s) => setTimeout(s, 2500)); continue; }
     throw e;
