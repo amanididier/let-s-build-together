@@ -56,7 +56,7 @@ async function pickModel(force = false) {
   const s = await chrome.storage.local.get(["modelOverride", "modelCache"]);
   if (s.modelOverride) return s.modelOverride;
   if (!force && s.modelCache && Date.now() - s.modelCache.at < 864e5) return s.modelCache.name;
-  const r = await req(`${BASE}/models?pageSize=1000&key=${encodeURIComponent(await key())}`, {}, 10000);
+  const r = await req(`${BASE}/models?pageSize=1000`, { headers: { "x-goog-api-key": await key() } }, 10000);
   if (!r.ok) throw await fromHttp(r);
   const names = ((await r.json()).models || [])
     .filter((m) => m.supportedGenerationMethods?.includes("generateContent"))
@@ -77,8 +77,8 @@ async function generate(body, ms = 45000) {
   const k = await key();
   let model = await pickModel(), refetched = false;
   for (let attempt = 0; attempt < 3; attempt++) {
-    const r = await req(`${BASE}/models/${model}:generateContent?key=${encodeURIComponent(k)}`,
-      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }, ms);
+    const r = await req(`${BASE}/models/${model}:generateContent`,
+      { method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": k }, body: JSON.stringify(body) }, ms);
     if (r.ok) {
       const j = await r.json();
       if (j?.promptFeedback?.blockReason || j?.candidates?.[0]?.finishReason === "SAFETY") throw new AIError("BLOCKED");
@@ -179,6 +179,11 @@ async function handle(msg, tabId) {
       chrome.storage.session.set({ libraryChanged: Date.now() });
       return { state: "done", message: "Saved to your library", id: m.id };
     }
+    if (msg.saved) {
+      const r = msg.t === "CLIP_ASK" ? await clipAsk(p, msg.question) : await pauseAsk(p, msg.question);
+      await log(msg.t, "done", { id: p.requestId, ms: Date.now() - t0, model: r.model, saved: true });
+      return { state: "done", result: r.data, model: r.model };
+    }
     await setLast({ kind: msg.t, state: "working", p: slim(p), question: msg.question, tabId });
     const r = msg.t === "ASK" ? await pauseAsk(p, msg.question) : msg.t === "CLIP_ASK" ? await clipAsk(p, msg.question) : await copyExtract(p);
     await setLast({ kind: msg.t, state: "done", p: slim(p), question: msg.question, tabId, result: r.data, model: r.model });
@@ -187,7 +192,7 @@ async function handle(msg, tabId) {
     return { state: "done", message: msg.t === "COPY" ? (n ? `Found ${n} item${n > 1 ? "s" : ""} — see the side panel` : "Nothing readable in the box") : "Answer is in the side panel" };
   } catch (e) {
     const message = e instanceof AIError ? e.message : `Something broke: ${e?.message || e}`;
-    if (msg.t !== "SAVE") await setLast({ kind: msg.t, state: "error", p: slim(p), question: msg.question, tabId, error: message });
+    if (msg.t !== "SAVE" && !msg.saved) await setLast({ kind: msg.t, state: "error", p: slim(p), question: msg.question, tabId, error: message });
     await log(msg.t, "error", { id: p?.requestId, ms: Date.now() - t0, code: e?.code, message });
     return { state: "error", message };
   }
@@ -197,8 +202,8 @@ async function testKey() {
   const t0 = Date.now();
   await key();
   const model = await pickModel(true);
-  const r = await req(`${BASE}/models/${model}:generateContent?key=${encodeURIComponent(await key())}`,
-    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contents: [{ parts: [{ text: "Reply with the word ok." }] }] }) }, 10000);
+  const r = await req(`${BASE}/models/${model}:generateContent`,
+    { method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": await key() }, body: JSON.stringify({ contents: [{ parts: [{ text: "Reply with the word ok." }] }] }) }, 10000);
   if (!r.ok) throw await fromHttp(r);
   await log("TEST_KEY", "done", { model, ms: Date.now() - t0 });
   return { model, ms: Date.now() - t0 };
@@ -206,7 +211,7 @@ async function testKey() {
 
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   const tabId = msg.tabId ?? sender.tab?.id;
-  if (["ASK", "COPY", "CLIP_ASK"].includes(msg.t)) { if (sender.tab) chrome.sidePanel.open({ tabId }).catch(() => {}); }
+  if (["ASK", "COPY", "CLIP_ASK"].includes(msg.t)) { if (sender.tab && !msg.saved) chrome.sidePanel.open({ tabId }).catch(() => {}); }
   if (["SAVE", "ASK", "COPY", "CLIP_SAVE", "CLIP_ASK"].includes(msg.t)) { handle(msg, tabId).then(reply); return true; }
   if (msg.t === "WATCH_GET") { chrome.storage.local.get("watchOn").then((r) => reply({ on: !!r.watchOn })); return true; }
   if (msg.t === "WATCH_SET") { chrome.storage.local.set({ watchOn: !!msg.on }).then(() => reply({ ok: true })); log("WATCH_SET", msg.on ? "on" : "off"); return true; }

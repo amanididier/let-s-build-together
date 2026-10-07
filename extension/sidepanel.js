@@ -9,6 +9,7 @@ let openMoment = null;
 let diagnosticsText = "";
 
 function showView(name) {
+  if (name !== "detail") clearInterval(flipTimer);
   document.querySelectorAll(".view").forEach((view) => { view.hidden = view.id !== name; });
   document.querySelectorAll("[data-view]").forEach((button) => button.classList.toggle("active", button.dataset.view === name));
   if (name === "library") renderLibrary();
@@ -99,13 +100,46 @@ async function renderLibrary() {
   });
 }
 
+const toDataUrl = (blob) => new Promise((resolve) => { const r = new FileReader(); r.onload = () => resolve(r.result); r.readAsDataURL(blob); });
+let flipTimer = null;
+
 async function openDetail(moment) {
-  openMoment = moment;
+  openMoment = moment; clearInterval(flipTimer);
   const blob = moment.crop || moment.thumbnail;
   const source = blob ? URL.createObjectURL(blob) : ""; if (source) objectUrls.push(source);
+  const frames = (moment.samples || []).map((s) => { const u = URL.createObjectURL(s.image); objectUrls.push(u); return { u, t: s.tSec }; });
   const answer = moment.answer || {};
-  byId("detailBody").innerHTML = `${source ? `<img class="detail-image" src="${source}" alt="Saved moment">` : ""}<h1 class="detail-title">${safe(moment.title)}</h1><div class="detail-source">${safe(moment.videoTitle)} · ${formatTime(moment.startSec)}${moment.endSec != null ? `–${formatTime(moment.endSec)}` : ""}</div>${answer.answer ? `<div class="detail-answer"><p class="lead">${safe(answer.answer)}</p>${factGroup("Observed", "observed", answer.observed)}${factGroup("Inferred", "inferred", answer.inferred)}${factGroup("Can't tell", "cannot", answer.cannotTell)}</div>` : ""}${artifactsHtml(moment.artifacts)}<div class="action-row"><button id="detailWatch" class="primary">Watch again</button><button id="detailDelete" class="secondary danger">Delete</button></div>`;
+  const isClip = moment.kind === "clip";
+  byId("detailBody").innerHTML = `${source ? `<img id="detailImg" class="detail-image" src="${source}" alt="Saved moment">` : ""}${frames.length > 1 ? `<div class="action-row"><button id="flip" class="secondary">▶ Play frames</button><span id="flipTime" class="status-line"></span></div><input id="flipBar" type="range" min="0" max="${frames.length - 1}" value="0" style="width:100%">` : ""}<h1 class="detail-title">${safe(moment.title)}</h1><div class="detail-source">${safe(moment.videoTitle)} · ${formatTime(moment.startSec)}${moment.endSec != null ? `–${formatTime(moment.endSec)}` : ""}</div>
+  <div class="key-row"><input id="detailQ" placeholder="${isClip ? "Ask about this clip…" : "Ask about this moment…"}"><button id="detailAsk">Ask</button></div><div id="detailAskStatus" class="status-line"></div>
+  ${answer.answer ? `<div class="detail-answer">${moment.question ? `<p class="question">You asked: ${safe(moment.question)}</p>` : ""}<p class="lead">${safe(answer.answer)}</p>${factGroup("Observed", "observed", answer.observed)}${factGroup("Inferred", "inferred", answer.inferred)}${factGroup("Can't tell", "cannot", answer.cannotTell)}${answer.steps?.length ? `<div class="fact-group"><h3>Steps</h3><ol class="steps">${answer.steps.map((st) => `<li>${safe(st.text)}</li>`).join("")}</ol></div>` : ""}</div>` : ""}${artifactsHtml(moment.artifacts)}<div class="action-row"><button id="detailWatch" class="primary">Watch at ${formatTime(moment.startSec)}</button><button id="detailDelete" class="secondary danger">Delete</button></div>`;
   bindArtifacts(byId("detailBody"), moment.artifacts || []);
+  if (frames.length > 1) {
+    let i = 0;
+    const show = (n) => { i = n; byId("detailImg").src = frames[i].u; byId("flipBar").value = i; byId("flipTime").textContent = `${formatTime(frames[i].t)} · frame ${i + 1}/${frames.length}`; };
+    show(0);
+    byId("flipBar").oninput = (e) => { clearInterval(flipTimer); flipTimer = null; byId("flip").textContent = "▶ Play frames"; show(Number(e.target.value)); };
+    byId("flip").onclick = () => {
+      if (flipTimer) { clearInterval(flipTimer); flipTimer = null; byId("flip").textContent = "▶ Play frames"; return; }
+      byId("flip").textContent = "❚❚ Pause";
+      flipTimer = setInterval(() => show((i + 1) % frames.length), 500);
+    };
+  }
+  byId("detailAsk").onclick = async () => {
+    const question = byId("detailQ").value.trim(), status = byId("detailAskStatus");
+    if (!question) { status.textContent = "Type a question first."; status.className = "status-line bad"; return; }
+    const btn = byId("detailAsk"); btn.disabled = true; status.textContent = "Billy is looking…"; status.className = "status-line";
+    const base = { requestId: crypto.randomUUID(), videoId: moment.videoId, titleGuess: moment.videoTitle, channel: moment.channel, url: `https://www.youtube.com/watch?v=${moment.videoId}`, timestampSec: moment.startSec, transcriptWindow: moment.transcript, box: moment.box };
+    let p;
+    if (isClip) p = { ...base, kind: "clip", startSec: moment.startSec, endSec: moment.endSec, samples: await Promise.all((moment.samples || []).map(async (s) => ({ tSec: s.tSec, b64: await toDataUrl(s.image) }))) };
+    else { const d = await toDataUrl(moment.crop); p = { ...base, cropB64: d, currentFrameB64: d, priorFramesB64: [] }; }
+    const r = await send({ t: isClip ? "CLIP_ASK" : "ASK", saved: true, p, question });
+    btn.disabled = false;
+    if (r?.state !== "done") { status.textContent = r?.message || "Billy did not answer."; status.className = "status-line bad"; return; }
+    const updated = { ...moment, question, answer: r.result, artifacts: [...(moment.artifacts || []), ...(r.result.copyBlocks || [])], updatedAt: Date.now() };
+    await DB.put("moments", updated);
+    openDetail(updated);
+  };
   byId("detailWatch").onclick = () => seek(moment.videoId, moment.startSec);
   byId("detailDelete").onclick = async () => { if (!confirm("Delete this saved moment?")) return; await DB.del("moments", moment.id); openMoment = null; showView("library"); };
   showView("detail");
@@ -126,7 +160,7 @@ chrome.storage.local.get(["apiKey", "modelCache"], (stored) => {
 });
 byId("saveKey").onclick = async () => {
   const key = byId("key").value.trim();
-  if (!/^AIza[\w-]{20,}$/.test(key)) { byId("keyStatus").textContent = "Paste the complete key beginning with AIza."; byId("keyStatus").className = "status-line bad"; return; }
+  if (!/^(AIza|AQ\.)[\w.-]{20,}$/.test(key)) { byId("keyStatus").textContent = "Paste the complete Gemini key (starts with AIza or AQ.)."; byId("keyStatus").className = "status-line bad"; return; }
   await chrome.storage.local.set({ apiKey: key }); await chrome.storage.local.remove("modelCache"); byId("key").value = ""; byId("key").placeholder = "Saved securely";
   byId("keyStatus").textContent = "Testing…"; byId("keyStatus").className = "status-line";
   const result = await send({ t: "TEST_KEY" });
