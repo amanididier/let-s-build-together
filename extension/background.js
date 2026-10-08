@@ -41,6 +41,7 @@ async function fromHttp(r) {
   const j = await r.json().catch(() => ({}));
   const m = j?.error?.message || "";
   if (r.status === 429) return new AIError("RATE_LIMIT");
+  if (r.status === 503 || /high demand|overloaded/i.test(m)) return new AIError("RATE_LIMIT", "every Gemini model is busy right now");
   if (r.status === 404 || /not found|no longer available|not supported/i.test(m)) return new AIError("MODEL_NOT_FOUND", m.slice(0, 120));
   if (r.status === 401 || r.status === 403 || /api key/i.test(m)) return new AIError("AUTH");
   return new AIError("BAD_RESPONSE", m.slice(0, 120) || `HTTP ${r.status}`);
@@ -125,18 +126,26 @@ async function generate(body, idleMs = 90000) {
   return keepAlive((async () => {
     const k = await key();
     let model = await pickModel(), refetched = false;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const out = await streamCall(model, k, body, idleMs);
+    // Busy-model fallback: newest models are often overloaded (503 "high demand"). Try the next working model instead of failing.
+    const { modelCache } = await chrome.storage.local.get("modelCache");
+    const queue = [...new Set([...(modelCache?.candidates || []), FALLBACK_MODEL])].filter((n) => n !== model);
+    let lastErr = new AIError("BAD_RESPONSE");
+    for (let attempt = 0; attempt < 6; attempt++) {
+      let out;
+      try { out = await streamCall(model, k, body, idleMs); }
+      catch (e) { if (e.code === "TIMEOUT" && queue.length) { lastErr = e; model = queue.shift(); continue; } throw e; }
       if (!out.r) return { ...out, model };
       const r = out.r, e = await fromHttp(r);
       if (r.status === 400 && body.generationConfig?.thinkingConfig && /thinking/i.test(e.message)) {
         delete body.generationConfig.thinkingConfig; continue; // model doesn't accept the thinking setting
       }
       if (e.code === "MODEL_NOT_FOUND" && !refetched) { refetched = true; model = await pickModel(true); continue; }
-      if ((e.code === "RATE_LIMIT" || r.status >= 500) && attempt === 0) { await new Promise((s) => setTimeout(s, 2500)); continue; }
+      if ((e.code === "RATE_LIMIT" || r.status >= 500 || /high demand|overloaded|unavailable/i.test(e.message)) && queue.length) {
+        lastErr = e; await log("MODEL_BUSY", model); model = queue.shift(); continue;
+      }
       throw e;
     }
-    throw new AIError("BAD_RESPONSE");
+    throw lastErr;
   })());
 }
 
