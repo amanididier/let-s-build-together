@@ -248,12 +248,11 @@ async function handle(msg, tabId) {
 async function testKey() {
   const t0 = Date.now();
   await key();
-  const model = await pickModel(true);
-  const r = await req(`${BASE}/models/${model}:generateContent`,
-    { method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": await key() }, body: JSON.stringify({ contents: [{ parts: [{ text: "Reply with the word ok." }] }] }) }, 10000);
-  if (!r.ok) throw await fromHttp(r);
-  await log("TEST_KEY", "done", { model, ms: Date.now() - t0 });
-  return { model, ms: Date.now() - t0 };
+  await pickModel(true);
+  // Same streaming path as real answers, with minimal thinking, so the test reflects reality and returns fast.
+  const r = await generate({ contents: [{ role: "user", parts: [{ text: "Reply with the word ok." }] }], generationConfig: { thinkingConfig: { thinkingLevel: "low" } } }, 30000);
+  await log("TEST_KEY", "done", { model: r.model, ms: Date.now() - t0, ttfb: r.ttfb });
+  return { model: r.model, ms: Date.now() - t0 };
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
