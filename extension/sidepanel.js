@@ -51,7 +51,13 @@ async function renderCurrent() {
     current.innerHTML = `<div class="welcome"><div class="welcome-mark"><img src="icons/icon48.png" alt=""></div><p class="eyebrow">Ready when you are</p><h1>Understand any moment.</h1><p>On YouTube, turn Billy on, pause, and draw around what matters.</p><div class="flow"><div><b>01</b>Pause</div><div><b>02</b>Point</div><div><b>03</b>Ask, save or copy</div></div></div>`;
     return;
   }
-  const { p = {}, kind, state, result = {}, question, tabId, error, model } = last;
+  let { p = {}, kind, state, result = {}, question, tabId, error, model } = last;
+  // If Billy's background was shut down mid-answer, "working" would stay forever. After 4.5 min, say so.
+  if (state === "working") {
+    const age = Date.now() - (last.at || 0);
+    if (age > 270000) { state = "error"; error = "The answer got lost (Chrome stopped Billy while waiting). Try again from the video."; }
+    else setTimeout(() => chrome.storage.session.get("last").then(({ last: l }) => l?.state === "working" && l.at === last.at && renderCurrent?.()), 270000 - age + 500);
+  }
   const source = `${safe(p.titleGuess || "YouTube moment")} · ${formatTime(p.timestampSec || p.startSec)}`;
   const image = p.cropB64 || p.thumbnailB64;
   let body = "";
