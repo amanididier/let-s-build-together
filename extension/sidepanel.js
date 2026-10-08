@@ -131,6 +131,7 @@ async function openDetail(moment) {
       flipTimer = setInterval(() => show((i + 1) % frames.length), 500);
     };
   }
+  byId("detailQ").onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); byId("detailAsk").click(); } };
   byId("detailAsk").onclick = async () => {
     const question = byId("detailQ").value.trim(), status = byId("detailAskStatus");
     if (!question) { status.textContent = "Type a question first."; status.className = "status-line bad"; return; }

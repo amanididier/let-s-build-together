@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Billy — watch YouTube together",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Pause, point at the video, ask. Billy answers, remembers it with its source.",
   "permissions": ["sidePanel", "storage", "unlimitedStorage", "alarms", "tabs"],
   "host_permissions": ["https://www.youtube.com/*", "https://generativelanguage.googleapis.com/*"],
